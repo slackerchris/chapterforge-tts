@@ -105,6 +105,8 @@ def clean_markdown(text: str) -> str:
     text = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", text)
     # Remaining heading hashes
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Strip backslash escapes e.g. \! \" \[ \* → just the character
+    text = re.sub(r"\\(.)", r"\1", text)
     # Collapse excess blank lines left by stripping
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
