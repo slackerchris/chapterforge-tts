@@ -10,6 +10,8 @@ import json
 import hashlib
 import threading
 import time
+import subprocess
+import tempfile
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -142,7 +144,7 @@ def split_into_chunks(text: str, max_chars: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def call_kokoro(text: str, voice: str, speed: float) -> bytes:
-    """Send a chunk to Kokoro and return raw audio bytes."""
+    """Send a chunk to Kokoro and return raw audio bytes (WAV)."""
     payload = {
         "model": "kokoro",
         "voice": voice,
@@ -152,6 +154,36 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
     resp = requests.post(KOKORO_ENDPOINT, json=payload, timeout=120)
     resp.raise_for_status()
     return resp.content
+
+
+def concat_chunks_to_mp3(audio_chunks: list[bytes], output_path: Path) -> None:
+    """Concatenate WAV audio chunks into a single MP3 using ffmpeg."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+
+        chunk_paths = []
+        for i, data in enumerate(audio_chunks):
+            p = tmp / f"chunk_{i:04d}.wav"
+            p.write_bytes(data)
+            chunk_paths.append(p)
+
+        list_file = tmp / "chunks.txt"
+        list_file.write_text(
+            "\n".join(f"file '{p}'" for p in chunk_paths),
+            encoding="utf-8",
+        )
+
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", str(list_file),
+                "-codec:a", "libmp3lame", "-q:a", "2",
+                str(output_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -230,13 +262,10 @@ def record_job(job_id: str) -> None:
                 audio_data = call_kokoro(chunk, voice, speed)
                 audio_parts.append(audio_data)
 
-            # Concatenate raw audio parts (WAV or MP3 depending on Kokoro output)
+            # Concatenate WAV chunks → MP3 via ffmpeg
             chapter_filename = f"{ch_idx + 1:02d}_{_safe_slug(chapter['title'])}.mp3"
             chapter_path = build_dir / chapter_filename
-
-            with open(chapter_path, "wb") as f:
-                for part in audio_parts:
-                    f.write(part)
+            concat_chunks_to_mp3(audio_parts, chapter_path)
 
             manifest["chapters"].append(
                 {
