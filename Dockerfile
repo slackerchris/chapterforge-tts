@@ -11,6 +11,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ .
 
+# Bake the version from the VERSION file into the image
+COPY VERSION .
+ARG APP_VERSION=dev
+ENV APP_VERSION=${APP_VERSION}
+
 # Books and output are expected to be mounted as volumes
 RUN mkdir -p /app/books /app/output
 

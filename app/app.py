@@ -34,6 +34,7 @@ DEFAULT_VOICE = os.environ.get("DEFAULT_VOICE", "af_bella")
 DEFAULT_SPEED = float(os.environ.get("DEFAULT_SPEED", "0.85"))
 DEFAULT_MAX_CHARS = int(os.environ.get("DEFAULT_MAX_CHARS", "1400"))
 CHAPTER_TRAIL_SILENCE = float(os.environ.get("CHAPTER_TRAIL_SILENCE", "3.0"))
+APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 BOOKS_DIR = Path(os.environ.get("BOOKS_DIR", "/app/books"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/output"))
@@ -692,5 +693,8 @@ function renderStatus(job) {{
   box.innerHTML = lines;
 }}
 </script>
+<footer style="text-align:center;color:#555;font-size:0.75rem;margin-top:2rem;padding-bottom:1rem;">
+  ChapterForge TTS &mdash; v{APP_VERSION}
+</footer>
 </body>
 </html>"""
