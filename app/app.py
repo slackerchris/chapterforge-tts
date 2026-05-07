@@ -197,12 +197,12 @@ def _init_app() -> None:
 # ---------------------------------------------------------------------------
 
 CHAPTER_HEADING_RE = re.compile(
-    r"^#{1,3}\s+("
+    r"^#{1,2}\s+("
     r"chapter\s+[\divxlc]+"       # Chapter 1, Chapter IV
     r"|ch\.?\s*[\divxlc]+"        # Ch 1, Ch. IV
     r"|prologue"
     r"|epilogue"
-    r"|part\s+[\divxlc]+"         # Part 1, Part II
+    r"|part\s+[\divxlc]+"         # Part 1, Part II  (top-level only — ## or #)
     r"|act\s+[\divxlc]+"          # Act 1, Act II
     r"|interlude(?:\s+[\divxlc]+|\s+\w+)?"  # Interlude, Interlude 1, Interlude: The Rift
     r"|journal(?:\s+[\divxlc]+|\s+\w+)?"    # Journal, Journal 1, Journal: Anya
