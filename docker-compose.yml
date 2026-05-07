@@ -1,0 +1,15 @@
+services:
+  chapterforge-tts:
+    build: .
+    container_name: chapterforge-tts
+    ports:
+      - "8890:8890"
+    environment:
+      KOKORO_ENDPOINT: "http://tts.throne.middl.earth/v1/audio/speech"
+      DEFAULT_VOICE: "af_bella"
+      DEFAULT_SPEED: "0.85"
+      DEFAULT_MAX_CHARS: "1400"
+    volumes:
+      - ./books:/app/books
+      - ./output:/app/output
+    restart: unless-stopped
