@@ -22,6 +22,7 @@ from typing import Optional
 
 import requests
 import aiofiles
+from mutagen.id3 import ID3, TIT2, TRCK, TALB, TPE1, ID3NoHeaderError
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -246,6 +247,88 @@ def split_into_chunks(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
+def tag_mp3(path: Path, title: str, track: int, album: str, artist: str = "ChapterForge TTS") -> None:
+    """Embed ID3 tags into an MP3 file."""
+    try:
+        tags = ID3(str(path))
+    except ID3NoHeaderError:
+        tags = ID3()
+    tags["TIT2"] = TIT2(encoding=3, text=title)
+    tags["TRCK"] = TRCK(encoding=3, text=str(track))
+    tags["TALB"] = TALB(encoding=3, text=album)
+    tags["TPE1"] = TPE1(encoding=3, text=artist)
+    tags.save(str(path))
+
+
+def get_audio_duration_ms(path: Path) -> int:
+    """Return audio duration in milliseconds using ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    return int(float(result.stdout.strip()) * 1000)
+
+
+def build_m4b(build_dir: Path, chapters: list[dict], book: str) -> Path:
+    """Concatenate all chapter MP3s into a single M4B with chapter markers."""
+    mp3s = [build_dir / ch["output_mp3"] for ch in chapters]
+
+    # Build ffmetadata with chapter markers
+    meta_lines = [";", "[CHAPTER]"[:0]]  # just start with the header
+    meta_lines = [";"]  # comment
+    meta_lines.append("[STREAM]"[:0])  # placeholder, not needed
+    # Build proper ffmetadata
+    metadata = ";FFMETADATA1\n"
+    metadata += f"title={book}\n"
+    metadata += f"artist=ChapterForge TTS\n\n"
+
+    offset_ms = 0
+    for ch in chapters:
+        mp3_path = build_dir / ch["output_mp3"]
+        duration_ms = get_audio_duration_ms(mp3_path)
+        start_ms = offset_ms
+        end_ms = offset_ms + duration_ms
+        metadata += "[CHAPTER]\n"
+        metadata += "TIMEBASE=1/1000\n"
+        metadata += f"START={start_ms}\n"
+        metadata += f"END={end_ms}\n"
+        metadata += f"title={ch['title']}\n\n"
+        offset_ms = end_ms
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+
+        meta_path = tmp / "metadata.txt"
+        meta_path.write_text(metadata, encoding="utf-8")
+
+        concat_list = tmp / "concat.txt"
+        concat_list.write_text(
+            "\n".join(f"file '{mp3}'" for mp3 in mp3s),
+            encoding="utf-8",
+        )
+
+        m4b_path = build_dir / f"{_safe_slug(book)}.m4b"
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                "-i", str(meta_path),
+                "-map_metadata", "1",
+                "-codec:a", "aac", "-b:a", "64k",
+                "-movflags", "+faststart",
+                str(m4b_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    return m4b_path
+
+
 # ---------------------------------------------------------------------------
 # TTS
 # ---------------------------------------------------------------------------
@@ -432,6 +515,7 @@ def record_job(job_id: str) -> None:
             chapter_path = build_dir / chapter_filename
             logger.info("[%s]   Encoding %s", job_id[:8], chapter_filename)
             concat_chunks_to_mp3(audio_parts, chapter_path)
+            tag_mp3(chapter_path, title=chapter["title"], track=ch_idx + 1, album=stem)
 
             manifest["chapters"].append(
                 {
@@ -445,6 +529,16 @@ def record_job(job_id: str) -> None:
         # Write manifest
         manifest_path = build_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        # Build M4B audiobook with chapter markers
+        logger.info("[%s] Building M4B audiobook…", job_id[:8])
+        try:
+            m4b_path = build_m4b(build_dir, manifest["chapters"], stem)
+            manifest["m4b"] = m4b_path.name
+            manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            logger.info("[%s] M4B written: %s", job_id[:8], m4b_path.name)
+        except Exception as m4b_exc:
+            logger.warning("[%s] M4B build failed (non-fatal): %s", job_id[:8], m4b_exc)
 
         job["status"] = "complete"
         job["completed_at"] = datetime.utcnow().isoformat()
@@ -547,6 +641,42 @@ async def list_manuscripts():
     return {"manuscripts": files}
 
 
+class VoicePreviewRequest(BaseModel):
+    text: str = "The sunstone pulsed with a cold light, and Anya felt the Weave tighten around her."
+    voice: str = DEFAULT_VOICE
+    speed: float = DEFAULT_SPEED
+
+
+@app.post("/api/preview/voice")
+async def voice_preview(req: VoicePreviewRequest):
+    """Render a short text sample and return the WAV audio directly."""
+    text = req.text[:500]  # cap at 500 chars for safety
+    try:
+        audio = call_kokoro(text, req.voice, req.speed)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Kokoro error: {exc}")
+    return StreamingResponse(io.BytesIO(audio), media_type="audio/wav")
+
+
+@app.post("/api/preview/chapters")
+async def preview_chapters(req: JobRequest):
+    """Return the chapter list (title + word count) without generating any audio."""
+    manuscript_path = BOOKS_DIR / req.filename
+    if not manuscript_path.exists():
+        raise HTTPException(status_code=404, detail="Manuscript not found.")
+    text = manuscript_path.read_text(encoding="utf-8")
+    chapters = split_into_chapters(text)
+    result = [
+        {
+            "index": i + 1,
+            "title": ch["title"],
+            "word_count": len(ch["body"].split()),
+        }
+        for i, ch in enumerate(chapters)
+    ]
+    return {"filename": req.filename, "chapter_count": len(result), "chapters": result}
+
+
 @app.get("/api/jobs")
 async def list_jobs():
     """Return all jobs, most recent first. Used by the UI to reconnect after a page reload."""
@@ -562,7 +692,7 @@ async def get_build(build_id: str):
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-@app.get("/build/{build_id}/download")
+@app.get("/build/{build_id}/download/zip")
 async def download_build(build_id: str):
     """Return a ZIP archive of all chapter MP3s for a build."""
     if ".." in build_id or "/" in build_id:
@@ -583,6 +713,26 @@ async def download_build(build_id: str):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{build_id}.zip"'},
     )
+
+
+@app.get("/build/{build_id}/download/m4b")
+async def download_m4b(build_id: str):
+    """Return the M4B audiobook file for a build."""
+    if ".." in build_id or "/" in build_id:
+        raise HTTPException(status_code=400, detail="Invalid build ID.")
+    build_dir = OUTPUT_DIR / "chapters" / build_id
+    manifest_path = build_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="Build not found.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    m4b_name = manifest.get("m4b")
+    if not m4b_name:
+        raise HTTPException(status_code=404, detail="No M4B file for this build.")
+    m4b_path = build_dir / m4b_name
+    if not m4b_path.exists():
+        raise HTTPException(status_code=404, detail="M4B file missing on disk.")
+    return FileResponse(str(m4b_path), media_type="audio/mp4",
+                        headers={"Content-Disposition": f'attachment; filename="{m4b_name}"'})
 
 
 @app.get("/audio/{build_id}/{filename}")
@@ -639,12 +789,18 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
             f'</li>'
             for ch in b.get("chapters", [])
         )
+        m4b_link = (
+            f' &nbsp;<a href="/build/{b["build_id"]}/download/m4b" title="Download M4B audiobook" '
+            f'style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; M4B</a>'
+            if b.get("m4b") else ""
+        )
         build_rows += f"""
         <details>
           <summary><strong>{b.get("book", b["build_id"])}</strong>
             &nbsp;|&nbsp; {b.get("voice")} @ {b.get("speed")}
             &nbsp;|&nbsp; {b.get("draft_date", "")}
-            &nbsp;<a href="/build/{b["build_id"]}/download" title="Download all chapters as ZIP" style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; Export All</a>
+            &nbsp;<a href="/build/{b["build_id"]}/download/zip" title="Download all chapters as ZIP" style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; ZIP</a>
+            {m4b_link}
           </summary>
           <ul class="chapter-list">{chapters_html}</ul>
         </details>
@@ -676,6 +832,11 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     ul.chapter-list {{ list-style: none; padding: 0 0 0 1rem; }}
     ul.chapter-list li {{ margin-bottom: 0.5rem; }}
     audio {{ width: 100%; margin-bottom: 0.2rem; }}
+    .chapter-preview {{ background:#1a1a1a; border:1px solid #333; border-radius:4px; padding:0.6rem; margin-top:0.6rem; font-size:0.8rem; max-height:220px; overflow-y:auto; display:none; }}
+    .chapter-preview table {{ width:100%; border-collapse:collapse; }}
+    .chapter-preview td {{ padding:0.2rem 0.5rem; border-bottom:1px solid #2a2a2a; }}
+    .chapter-preview td:first-child {{ color:#888; width:2.5rem; }}
+    .chapter-preview td:last-child {{ color:#888; text-align:right; width:4rem; }}
     #upload-status {{ font-size: 0.8rem; color: #888; margin-top: 0.3rem; }}
   </style>
 </head>
@@ -693,7 +854,11 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
 <section>
   <h2>Record</h2>
   <label>Manuscript</label>
-  <select id="manuscript-select">{manuscript_options}</select>
+  <div style="display:flex;gap:0.5rem;align-items:flex-start;">
+    <select id="manuscript-select" style="margin-bottom:0.8rem;flex:1">{manuscript_options}</select>
+    <button onclick="previewChapters()" style="white-space:nowrap;background:#333;color:#ccc;">Preview Chapters</button>
+  </div>
+  <div class="chapter-preview" id="chapter-preview"></div>
   <div class="row">
     <div>
       <label>Voice</label>
@@ -719,6 +884,16 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
   </div>
   <button id="start-btn" onclick="startJob()">Start Recording</button>
   <button id="stop-btn" class="stop" onclick="stopJob()" disabled>Stop</button>
+</section>
+
+<section>
+  <h2>Voice Preview</h2>
+  <label>Sample text</label>
+  <input type="text" id="preview-text" value="The sunstone pulsed with a cold light, and she felt the Weave tighten.">
+  <div style="display:flex;gap:0.5rem;align-items:center;">
+    <button onclick="playVoicePreview()" id="preview-btn">&#9654; Play Preview</button>
+    <audio id="preview-player" controls style="flex:1;display:none;"></audio>
+  </div>
 </section>
 
 <section>
@@ -802,6 +977,53 @@ async function stopJob() {{
   if (!currentJobId) return;
   await fetch(`/api/jobs/${{currentJobId}}/stop`, {{ method: 'POST' }});
   document.getElementById('stop-btn').disabled = true;
+}}
+
+async function playVoicePreview() {{
+  const text = document.getElementById('preview-text').value.trim();
+  const voice = document.getElementById('voice-select').value;
+  const speed = parseFloat(document.getElementById('speed-input').value);
+  const btn = document.getElementById('preview-btn');
+  const player = document.getElementById('preview-player');
+  if (!text) return;
+  btn.disabled = true;
+  btn.textContent = 'Generating…';
+  try {{
+    const resp = await fetch('/api/preview/voice', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ text, voice, speed }})
+    }});
+    if (!resp.ok) {{ btn.textContent = '&#9654; Play Preview'; btn.disabled = false; return; }}
+    const blob = await resp.blob();
+    player.src = URL.createObjectURL(blob);
+    player.style.display = 'block';
+    player.play();
+  }} finally {{
+    btn.textContent = '&#9654; Play Preview';
+    btn.disabled = false;
+  }}
+}}
+
+async function previewChapters() {{
+  const filename = document.getElementById('manuscript-select').value;
+  if (!filename) return;
+  const voice = document.getElementById('voice-select').value;
+  const speed = parseFloat(document.getElementById('speed-input').value);
+  const panel = document.getElementById('chapter-preview');
+  panel.innerHTML = 'Loading…';
+  panel.style.display = 'block';
+  const resp = await fetch('/api/preview/chapters', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ filename, voice, speed }})
+  }});
+  if (!resp.ok) {{ panel.innerHTML = 'Error loading chapters.'; return; }}
+  const data = await resp.json();
+  const rows = data.chapters.map(ch =>
+    `<tr><td>${{ch.index}}</td><td>${{ch.title}}</td><td>${{ch.word_count.toLocaleString()}} w</td></tr>`
+  ).join('');
+  panel.innerHTML = `<strong>${{data.chapter_count}} chapters</strong><table>${{rows}}</table>`;
 }}
 
 function pollStatus() {{
