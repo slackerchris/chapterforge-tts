@@ -1495,7 +1495,7 @@ function parseBlend(str) {{
   }});
 }}
 
-// [{voice, weight}, ...] → "af_bella(0.6)+bm_george(0.4)" or "af_bella" if single full-weight
+// [{{voice, weight}}, ...] → "af_bella(0.6)+bm_george(0.4)" or "af_bella" if single full-weight
 function buildBlend(slots) {{
   const filtered = slots.filter(s => s.voice);
   if (filtered.length === 1 && filtered[0].weight === 1.0) return filtered[0].voice;
