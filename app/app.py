@@ -6,6 +6,7 @@ Turn manuscript drafts into chapter audio.
 import os
 import re
 import uuid
+import io
 import json
 import hashlib
 import threading
@@ -13,6 +14,7 @@ import time
 import subprocess
 import tempfile
 import logging
+import zipfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
@@ -21,7 +23,7 @@ from typing import Optional
 import requests
 import aiofiles
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -552,6 +554,29 @@ async def get_build(build_id: str):
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
+@app.get("/build/{build_id}/download")
+async def download_build(build_id: str):
+    """Return a ZIP archive of all chapter MP3s for a build."""
+    if ".." in build_id or "/" in build_id:
+        raise HTTPException(status_code=400, detail="Invalid build ID.")
+    build_dir = OUTPUT_DIR / "chapters" / build_id
+    if not build_dir.exists():
+        raise HTTPException(status_code=404, detail="Build not found.")
+    mp3_files = sorted(build_dir.glob("*.mp3"))
+    if not mp3_files:
+        raise HTTPException(status_code=404, detail="No audio files found in build.")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        for mp3 in mp3_files:
+            zf.write(mp3, mp3.name)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{build_id}.zip"'},
+    )
+
+
 @app.get("/audio/{build_id}/{filename}")
 async def get_audio(build_id: str, filename: str):
     # Prevent path traversal
@@ -599,7 +624,11 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     build_rows = ""
     for b in builds:
         chapters_html = "".join(
-            f'<li><audio controls src="/audio/{b["build_id"]}/{ch["output_mp3"]}"></audio> {ch["title"]}</li>'
+            f'<li>'
+            f'<audio controls src="/audio/{b["build_id"]}/{ch["output_mp3"]}"></audio>'
+            f' {ch["title"]}'
+            f' <a href="/audio/{b["build_id"]}/{ch["output_mp3"]}" download="{ch["output_mp3"]}" title="Download chapter" style="color:#e8c96e;font-size:0.8rem;margin-left:0.4rem;">&#8681;</a>'
+            f'</li>'
             for ch in b.get("chapters", [])
         )
         build_rows += f"""
@@ -607,6 +636,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
           <summary><strong>{b.get("book", b["build_id"])}</strong>
             &nbsp;|&nbsp; {b.get("voice")} @ {b.get("speed")}
             &nbsp;|&nbsp; {b.get("draft_date", "")}
+            &nbsp;<a href="/build/{b["build_id"]}/download" title="Download all chapters as ZIP" style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; Export All</a>
           </summary>
           <ul class="chapter-list">{chapters_html}</ul>
         </details>
