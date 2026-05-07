@@ -1476,6 +1476,31 @@ async function loadVoices() {{
   renderVoicesTable();
 }}
 
+const KOKORO_VOICES = [
+  ['🇺🇸 American Female', ['af_alloy','af_aoede','af_bella','af_heart','af_nicole','af_sarah','af_sky']],
+  ['🇺🇸 American Male',   ['am_adam','am_michael']],
+  ['🇬🇧 British Female',  ['bf_emma','bf_isabella']],
+  ['🇬🇧 British Male',    ['bm_george','bm_lewis']],
+];
+
+function voiceSelectHtml(id, selectedVal) {{
+  const sStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;width:100%;';
+  const known = KOKORO_VOICES.flatMap(g => g[1]);
+  let s = '<select id="' + id + '" style="' + sStyle + '">';
+  if (selectedVal && !known.includes(selectedVal)) {{
+    s += '<option value="' + selectedVal + '" selected>' + selectedVal + '</option>';
+  }}
+  for (const [label, voices] of KOKORO_VOICES) {{
+    s += '<optgroup label="' + label + '">';
+    for (const v of voices) {{
+      s += '<option value="' + v + '"' + (v === selectedVal ? ' selected' : '') + '>' + v + '</option>';
+    }}
+    s += '</optgroup>';
+  }}
+  s += '</select>';
+  return s;
+}}
+
 function renderVoicesTable() {{
   const container = document.getElementById('voices-container');
   if (!container) return;
@@ -1494,7 +1519,7 @@ function renderVoicesTable() {{
     const nc = name === 'narrator' ? '#e8c96e' : '#ccc';
     html += '<tr>';
     html += '<td style="padding:0.3rem 0.4rem;color:' + nc + '">' + name + '</td>';
-    html += '<td style="padding:0.3rem 0.4rem"><input id="vv_' + name + '" type="text" value="' + (p.voice || '') + '" style="width:100%;' + iStyle + '"></td>';
+    html += '<td style="padding:0.3rem 0.4rem">' + voiceSelectHtml('vv_' + name, p.voice || '{DEFAULT_VOICE}') + '</td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vs_' + name + '" type="number" value="' + (p.speed !== undefined ? p.speed : 0.85) + '" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
@@ -1506,7 +1531,7 @@ function renderVoicesTable() {{
   }}
   html += '</tbody><tfoot><tr style="border-top:1px solid #333">';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-name" type="text" placeholder="name" style="width:100%;' + iStyle + '"></td>';
-  html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-voice" type="text" placeholder="voice or blend" style="width:100%;' + iStyle + '"></td>';
+  html += '<td style="padding:0.4rem 0.4rem">' + voiceSelectHtml('new-char-voice', '{DEFAULT_VOICE}') + '</td>';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-speed" type="number" value="{DEFAULT_SPEED}" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-pitch" type="number" value="1.0" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem;white-space:nowrap">';
