@@ -46,6 +46,10 @@ jobs:
             # short SHA always included
             type=sha,prefix=sha-,format=short
 
+      - name: Read VERSION file
+        id: version
+        run: echo "value=$(cat VERSION | tr -d '[:space:]')" >> $GITHUB_OUTPUT
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -54,4 +58,4 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            APP_VERSION=${{ steps.meta.outputs.version }}
+            APP_VERSION=${{ steps.version.outputs.value }}
