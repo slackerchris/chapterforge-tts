@@ -1473,7 +1473,13 @@ async function loadVoices() {{
   }} catch (e) {{
     voicesData = {{}};
   }}
-  renderVoicesTable();
+  try {{
+    renderVoicesTable();
+  }} catch (e) {{
+    const container = document.getElementById('voices-container');
+    if (container) container.innerHTML = '<p style="color:#c0392b;font-size:0.85rem">Error rendering voices table: ' + e.message + '</p>';
+    console.error('renderVoicesTable error:', e);
+  }}
 }}
 
 const KOKORO_VOICES = [
