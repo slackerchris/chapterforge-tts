@@ -1466,9 +1466,13 @@ function renderStatus(job) {{
 }}
 
 async function loadVoices() {{
-  const resp = await fetch('/api/voices');
-  if (resp.ok) voicesData = await resp.json();
-  else voicesData = {{}};
+  try {{
+    const resp = await fetch('/api/voices');
+    if (resp.ok) voicesData = await resp.json();
+    else voicesData = {{}};
+  }} catch (e) {{
+    voicesData = {{}};
+  }}
   renderVoicesTable();
 }}
 
@@ -1499,9 +1503,9 @@ function renderVoicesTable() {{
     html += '<td style="padding:0.3rem 0.4rem"><input id="vs_' + name + '" type="number" value="' + (p.speed !== undefined ? p.speed : 0.85) + '" step="0.05" min="0.5" max="2.0" style="width:5.5rem;background:#222;border:1px solid #444;color:#eee;padding:0.2rem;border-radius:3px;font-size:0.8rem;"></td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;background:#222;border:1px solid #444;color:#eee;padding:0.2rem;border-radius:3px;font-size:0.8rem;"></td>';
     html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
-    html += '<button onclick="testCharVoice(\'' + name + '\')" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;">Test</button>';
+    html += '<button data-name="' + name + '" onclick="testCharVoice(this.dataset.name)" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;">Test</button>';
     if (name !== 'narrator') {{
-      html += ' <button onclick="removeCharVoice(\'' + name + '\')" style="background:#333;color:#c0392b;padding:0.1rem 0.5rem;font-size:0.75rem;">&#10005;</button>';
+      html += ' <button data-name="' + name + '" onclick="removeCharVoice(this.dataset.name)" style="background:#333;color:#c0392b;padding:0.1rem 0.5rem;font-size:0.75rem;">&#10005;</button>';
     }}
     html += '</td></tr>';
   }}
@@ -1573,7 +1577,7 @@ async function testCharVoice(name) {{
   if (!profile) return;
   const text = document.getElementById('preview-text').value.trim() ||
     'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
-  const el = document.querySelector('[onclick="testCharVoice(\'' + name + '\')"');
+  const el = document.querySelector('button[data-name="' + name + '"][onclick^="testCharVoice"]');
   if (el) {{ el.disabled = true; el.textContent = '\u2026'; }}
   try {{
     const resp = await fetch('/api/preview/voice', {{
