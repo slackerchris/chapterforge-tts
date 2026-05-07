@@ -49,7 +49,15 @@ _file_handler = RotatingFileHandler(
 )
 _file_handler.setFormatter(_formatter)
 
-logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
+_error_handler = RotatingFileHandler(
+    _LOG_DIR / "chapterforge.errors.log",
+    maxBytes=5 * 1024 * 1024,  # 5 MB per file
+    backupCount=5,
+)
+_error_handler.setFormatter(_formatter)
+_error_handler.setLevel(logging.WARNING)
+
+logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler, _error_handler])
 logger = logging.getLogger("chapterforge")
 
 # ---------------------------------------------------------------------------

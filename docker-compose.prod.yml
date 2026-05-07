@@ -12,4 +12,5 @@ services:
     volumes:
       - /mnt/chapterforge/books:/app/books
       - /mnt/chapterforge/output:/app/output
+      - /mnt/chapterforge/logs:/app/logs
     restart: unless-stopped

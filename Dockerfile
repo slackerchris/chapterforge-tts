@@ -16,8 +16,8 @@ COPY VERSION .
 ARG APP_VERSION=dev
 ENV APP_VERSION=${APP_VERSION}
 
-# Books and output are expected to be mounted as volumes
-RUN mkdir -p /app/books /app/output
+# Books, output, and logs are expected to be mounted as volumes
+RUN mkdir -p /app/books /app/output /app/logs
 
 EXPOSE 8890
 
