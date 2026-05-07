@@ -117,7 +117,15 @@ def split_into_chapters(text: str) -> list[dict]:
     """Split manuscript text into chapters by heading."""
     text = strip_frontmatter(text)
     parts = CHAPTER_HEADING_RE.split(text)
-    headings = CHAPTER_HEADING_RE.findall(text)
+
+    # re.split with a capturing group interleaves captured text into parts:
+    # [preamble, cap0, body0, cap1, body1, ...]
+    # Use finditer to get full heading titles (e.g. "Chapter 1: A Price Beyond Gold")
+    # instead of just the captured keyword fragment.
+    headings = [
+        re.sub(r"^#{1,3}\s+", "", m.group(0)).strip()
+        for m in CHAPTER_HEADING_RE.finditer(text)
+    ]
 
     chapters = []
 
@@ -126,8 +134,10 @@ def split_into_chapters(text: str) -> list[dict]:
         chapters.append({"title": "Preamble", "body": parts[0].strip()})
 
     for i, heading in enumerate(headings):
-        body = parts[i + 1].strip() if i + 1 < len(parts) else ""
-        chapters.append({"title": heading.strip(), "body": body})
+        # Body sits at index (i+1)*2 because captured groups occupy odd indices
+        body_index = (i + 1) * 2
+        body = parts[body_index].strip() if body_index < len(parts) else ""
+        chapters.append({"title": heading, "body": body})
 
     # If no headings were found, treat the whole text as a single chapter
     if not chapters:
