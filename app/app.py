@@ -63,6 +63,7 @@ DEFAULT_MAX_CHARS = int(os.environ.get("DEFAULT_MAX_CHARS", "1400"))
 CHAPTER_TRAIL_SILENCE = float(os.environ.get("CHAPTER_TRAIL_SILENCE", "3.0"))
 KOKORO_RETRIES = int(os.environ.get("KOKORO_RETRIES", "3"))  # attempts per chunk
 KOKORO_RETRY_DELAY = float(os.environ.get("KOKORO_RETRY_DELAY", "10.0"))  # seconds between retries
+KOKORO_TIMEOUT = float(os.environ.get("KOKORO_TIMEOUT", "300.0"))  # seconds per request
 APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 BOOKS_DIR = Path(os.environ.get("BOOKS_DIR", "/app/books"))
@@ -254,7 +255,7 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
     last_exc: Exception | None = None
     for attempt in range(1, KOKORO_RETRIES + 1):
         try:
-            resp = requests.post(KOKORO_ENDPOINT, json=payload, timeout=120)
+            resp = requests.post(KOKORO_ENDPOINT, json=payload, timeout=KOKORO_TIMEOUT)
             resp.raise_for_status()
             return resp.content
         except Exception as exc:
