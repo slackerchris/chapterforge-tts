@@ -981,14 +981,27 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     <div>
       <label>Voice</label>
       <select id="voice-select">
-        <option value="af_bella" selected>af_bella</option>
-        <option value="af_heart">af_heart</option>
-        <option value="af_nicole">af_nicole</option>
-        <option value="af_sarah">af_sarah</option>
-        <option value="am_fenrir">am_fenrir</option>
-        <option value="am_michael">am_michael</option>
-        <option value="bm_fable">bm_fable</option>
-        <option value="bf_emma">bf_emma</option>
+        <optgroup label="🇺🇸 American Female">
+          <option value="af_alloy">af_alloy</option>
+          <option value="af_aoede">af_aoede</option>
+          <option value="af_bella" selected>af_bella</option>
+          <option value="af_heart">af_heart</option>
+          <option value="af_nicole">af_nicole</option>
+          <option value="af_sarah">af_sarah</option>
+          <option value="af_sky">af_sky</option>
+        </optgroup>
+        <optgroup label="🇺🇸 American Male">
+          <option value="am_adam">am_adam</option>
+          <option value="am_michael">am_michael</option>
+        </optgroup>
+        <optgroup label="🇬🇧 British Female">
+          <option value="bf_emma">bf_emma</option>
+          <option value="bf_isabella">bf_isabella</option>
+        </optgroup>
+        <optgroup label="🇬🇧 British Male">
+          <option value="bm_george">bm_george</option>
+          <option value="bm_lewis">bm_lewis</option>
+        </optgroup>
       </select>
     </div>
     <div>
