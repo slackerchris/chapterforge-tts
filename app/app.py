@@ -8,6 +8,7 @@ import re
 import uuid
 import io
 import json
+import sqlite3
 import hashlib
 import threading
 import time
@@ -91,13 +92,107 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ChapterForge TTS")
 
-# ---------------------------------------------------------------------------
-# In-memory job store
-# ---------------------------------------------------------------------------
-
-jobs: dict[str, dict] = {}
+@app.on_event("startup")
+def on_startup():
+    _init_app()
 
 # ---------------------------------------------------------------------------
+# SQLite job store
+# ---------------------------------------------------------------------------
+
+DB_PATH = Path(os.environ.get("DB_PATH", "/app/output/chapterforge.db"))
+_db_lock = threading.Lock()
+
+
+def _get_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db() -> None:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with _db_lock, _get_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY,
+                filename TEXT,
+                voice TEXT,
+                speed REAL,
+                max_chars INTEGER,
+                status TEXT,
+                created_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                current_chapter TEXT,
+                current_chapter_index INTEGER DEFAULT 0,
+                total_chapters INTEGER DEFAULT 0,
+                current_chunk INTEGER DEFAULT 0,
+                total_chunks INTEGER DEFAULT 0,
+                build_id TEXT,
+                error TEXT,
+                stop_requested INTEGER DEFAULT 0,
+                rechapter_index INTEGER
+            )
+        """)
+        conn.commit()
+
+
+def _job_to_dict(row) -> dict:
+    d = dict(row)
+    d["stop_requested"] = bool(d["stop_requested"])
+    return d
+
+
+def job_get(job_id: str) -> dict | None:
+    with _db_lock, _get_db() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+    return _job_to_dict(row) if row else None
+
+
+def job_set(job_id: str, **kwargs) -> None:
+    """Update one or more fields on a job row."""
+    if not kwargs:
+        return
+    cols = ", ".join(f"{k} = ?" for k in kwargs)
+    vals = list(kwargs.values()) + [job_id]
+    with _db_lock, _get_db() as conn:
+        conn.execute(f"UPDATE jobs SET {cols} WHERE job_id = ?", vals)
+        conn.commit()
+
+
+def job_insert(data: dict) -> None:
+    cols = ", ".join(data.keys())
+    placeholders = ", ".join("?" * len(data))
+    with _db_lock, _get_db() as conn:
+        conn.execute(f"INSERT INTO jobs ({cols}) VALUES ({placeholders})", list(data.values()))
+        conn.commit()
+
+
+def jobs_list_recent(limit: int = 100) -> list[dict]:
+    with _db_lock, _get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [_job_to_dict(r) for r in rows]
+
+
+# In-memory stop_requested flags (not persisted — only meaningful while process runs)
+_stop_flags: dict[str, bool] = {}
+
+
+def _init_app() -> None:
+    _init_db()
+    # Mark any jobs that were running/queued when the process last died as error
+    with _db_lock, _get_db() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'interrupted', error = 'Process restarted'"
+            " WHERE status IN ('running', 'queued', 'stopping')"
+        )
+        conn.commit()
+    logger.info("Database initialised at %s", DB_PATH)
+
+
 # Text processing
 # ---------------------------------------------------------------------------
 
@@ -433,9 +528,8 @@ def fire_webhook(payload: dict) -> None:
 
 
 def record_job(job_id: str) -> None:
-    job = jobs[job_id]
-    job["status"] = "running"
-    job["started_at"] = datetime.utcnow().isoformat()
+    job_set(job_id, status="running", started_at=datetime.utcnow().isoformat())
+    job = job_get(job_id)
     logger.info("[%s] Job started — file: %s, voice: %s, speed: %s",
                 job_id[:8], job["filename"], job["voice"], job["speed"])
 
@@ -458,60 +552,81 @@ def record_job(job_id: str) -> None:
         build_dir = OUTPUT_DIR / "chapters" / build_id
         build_dir.mkdir(parents=True, exist_ok=True)
 
-        job["build_id"] = build_id
-        job["build_dir"] = str(build_dir)
+        job_set(job_id, build_id=build_id)
 
         chapters = split_into_chapters(text)
-        job["total_chapters"] = len(chapters)
+        job_set(job_id, total_chapters=len(chapters))
         logger.info("[%s] Build ID: %s — %d chapters found",
                     job_id[:8], build_id, len(chapters))
 
-        manifest = {
-            "book": stem,
-            "draft": stem,
-            "draft_date": datetime.utcnow().date().isoformat(),
-            "source_file": job["filename"],
-            "source_hash": source_hash,
-            "voice": voice,
-            "speed": speed,
-            "max_chars": max_chars,
-            "build_id": build_id,
-            "chapters": [],
-        }
+        # Load existing manifest for partial resume
+        manifest_path = build_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                completed_indices = {c["chapter_index"] for c in manifest.get("chapters", [])}
+                logger.info("[%s] Resuming — %d chapters already done",
+                            job_id[:8], len(completed_indices))
+            except Exception:
+                manifest = None
+                completed_indices = set()
+        else:
+            manifest = None
+            completed_indices = set()
+
+        if manifest is None:
+            manifest = {
+                "book": stem,
+                "draft": stem,
+                "draft_date": datetime.utcnow().date().isoformat(),
+                "source_file": job["filename"],
+                "source_hash": source_hash,
+                "voice": voice,
+                "speed": speed,
+                "max_chars": max_chars,
+                "build_id": build_id,
+                "chapters": [],
+            }
 
         for ch_idx, chapter in enumerate(chapters):
-            if job.get("stop_requested"):
+            ch_num = ch_idx + 1
+            if _stop_flags.get(job_id):
                 logger.info("[%s] Stop requested before chapter %d — halting",
-                            job_id[:8], ch_idx + 1)
-                job["status"] = "stopped"
+                            job_id[:8], ch_num)
+                job_set(job_id, status="stopped")
                 return
 
-            job["current_chapter"] = chapter["title"]
-            job["current_chapter_index"] = ch_idx + 1
+            if ch_num in completed_indices:
+                logger.info("[%s] Skipping chapter %d/%d (already done)",
+                            job_id[:8], ch_num, len(chapters))
+                job_set(job_id, current_chapter=chapter["title"],
+                        current_chapter_index=ch_num)
+                continue
+
+            job_set(job_id, current_chapter=chapter["title"],
+                    current_chapter_index=ch_num)
             logger.info("[%s] Chapter %d/%d: %s",
-                        job_id[:8], ch_idx + 1, len(chapters), chapter["title"])
+                        job_id[:8], ch_num, len(chapters), chapter["title"])
 
             clean_body = clean_markdown(chapter["body"])
             clean_body = apply_pronunciations(clean_body)
-            # Prepend the chapter title so it is spoken at the start of the audio
             title_line = apply_pronunciations(chapter["title"])
             clean_body = f"{title_line}.\n\n{clean_body}"
             chunks = split_into_chunks(clean_body, max_chars)
             total_chunks = len(chunks)
-            job["total_chunks"] = total_chunks
-            job["current_chunk"] = 0
+            job_set(job_id, total_chunks=total_chunks, current_chunk=0)
             logger.info("[%s]   %d chunks to send", job_id[:8], total_chunks)
 
             audio_parts: list[bytes] = []
 
             for chunk_idx, chunk in enumerate(chunks):
-                if job.get("stop_requested"):
+                if _stop_flags.get(job_id):
                     logger.info("[%s] Stop requested at chunk %d/%d — halting",
                                 job_id[:8], chunk_idx + 1, total_chunks)
-                    job["status"] = "stopped"
+                    job_set(job_id, status="stopped")
                     return
 
-                job["current_chunk"] = chunk_idx + 1
+                job_set(job_id, current_chunk=chunk_idx + 1)
                 logger.debug("[%s]   Chunk %d/%d (%d chars)",
                              job_id[:8], chunk_idx + 1, total_chunks, len(chunk))
                 try:
@@ -522,25 +637,22 @@ def record_job(job_id: str) -> None:
                     raise
                 audio_parts.append(audio_data)
 
-            # Concatenate WAV chunks → MP3 via ffmpeg
-            chapter_filename = f"{ch_idx + 1:02d}_{_safe_slug(chapter['title'])}.mp3"
+            chapter_filename = f"{ch_num:02d}_{_safe_slug(chapter['title'])}.mp3"
             chapter_path = build_dir / chapter_filename
             logger.info("[%s]   Encoding %s", job_id[:8], chapter_filename)
             concat_chunks_to_mp3(audio_parts, chapter_path)
-            tag_mp3(chapter_path, title=chapter["title"], track=ch_idx + 1, album=stem)
+            tag_mp3(chapter_path, title=chapter["title"], track=ch_num, album=stem)
 
             manifest["chapters"].append(
                 {
-                    "chapter_index": ch_idx + 1,
+                    "chapter_index": ch_num,
                     "title": chapter["title"],
                     "chunk_count": total_chunks,
                     "output_mp3": chapter_filename,
                 }
             )
-
-        # Write manifest
-        manifest_path = build_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+            # Write manifest after each chapter so partial resume works
+            manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
         # Build M4B audiobook with chapter markers
         logger.info("[%s] Building M4B audiobook…", job_id[:8])
@@ -552,15 +664,13 @@ def record_job(job_id: str) -> None:
         except Exception as m4b_exc:
             logger.warning("[%s] M4B build failed (non-fatal): %s", job_id[:8], m4b_exc)
 
-        job["status"] = "complete"
-        job["completed_at"] = datetime.utcnow().isoformat()
+        job_set(job_id, status="complete", completed_at=datetime.utcnow().isoformat())
         logger.info("[%s] Job complete — build: %s", job_id[:8], build_id)
         fire_webhook({"event": "complete", "job_id": job_id, "build_id": build_id,
                       "book": stem, "chapters": len(manifest["chapters"])})
 
     except Exception as exc:
-        job["status"] = "error"
-        job["error"] = str(exc)
+        job_set(job_id, status="error", error=str(exc))
         logger.error("[%s] Job failed: %s", job_id[:8], exc, exc_info=True)
         fire_webhook({"event": "error", "job_id": job_id, "error": str(exc)})
 
@@ -607,7 +717,7 @@ async def upload_manuscript(file: UploadFile = File(...)):
 @app.post("/api/jobs")
 async def create_job(req: JobRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {
+    job_insert({
         "job_id": job_id,
         "filename": req.filename,
         "voice": req.voice,
@@ -615,6 +725,8 @@ async def create_job(req: JobRequest, background_tasks: BackgroundTasks):
         "max_chars": req.max_chars,
         "status": "queued",
         "created_at": datetime.utcnow().isoformat(),
+        "started_at": None,
+        "completed_at": None,
         "current_chapter": None,
         "current_chapter_index": 0,
         "total_chapters": 0,
@@ -622,15 +734,16 @@ async def create_job(req: JobRequest, background_tasks: BackgroundTasks):
         "total_chunks": 0,
         "build_id": None,
         "error": None,
-        "stop_requested": False,
-    }
+        "stop_requested": 0,
+        "rechapter_index": None,
+    })
     background_tasks.add_task(record_job, job_id)
     return {"job_id": job_id}
 
 
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: str):
-    job = jobs.get(job_id)
+    job = job_get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     return job
@@ -638,13 +751,13 @@ async def get_job(job_id: str):
 
 @app.post("/api/jobs/{job_id}/stop")
 async def stop_job(job_id: str):
-    job = jobs.get(job_id)
+    job = job_get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     if job["status"] not in ("queued", "running"):
         raise HTTPException(status_code=400, detail=f"Job is already {job['status']}.")
-    job["stop_requested"] = True
-    job["status"] = "stopping"
+    _stop_flags[job_id] = True
+    job_set(job_id, status="stopping", stop_requested=1)
     return {"status": "stopping"}
 
 
@@ -695,7 +808,7 @@ async def preview_chapters(req: JobRequest):
 @app.get("/api/jobs")
 async def list_jobs():
     """Return all jobs, most recent first. Used by the UI to reconnect after a page reload."""
-    return list(reversed(list(jobs.values())))
+    return jobs_list_recent()
 
 
 @app.get("/build/{build_id}")
@@ -746,7 +859,7 @@ async def rechapter(build_id: str, chapter_index: int, background_tasks: Backgro
         raise HTTPException(status_code=404, detail=f"Chapter {chapter_index} not found in manifest.")
 
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {
+    job_insert({
         "job_id": job_id,
         "filename": manifest["source_file"],
         "voice": manifest["voice"],
@@ -754,6 +867,8 @@ async def rechapter(build_id: str, chapter_index: int, background_tasks: Backgro
         "max_chars": manifest.get("max_chars", DEFAULT_MAX_CHARS),
         "status": "queued",
         "created_at": datetime.utcnow().isoformat(),
+        "started_at": None,
+        "completed_at": None,
         "current_chapter": ch_meta["title"],
         "current_chapter_index": chapter_index,
         "total_chapters": 1,
@@ -761,17 +876,17 @@ async def rechapter(build_id: str, chapter_index: int, background_tasks: Backgro
         "total_chunks": 0,
         "build_id": build_id,
         "error": None,
-        "stop_requested": False,
+        "stop_requested": 0,
         "rechapter_index": chapter_index,
-    }
+    })
     background_tasks.add_task(record_single_chapter, job_id, build_id, manifest_path)
     return {"job_id": job_id, "chapter_index": chapter_index}
 
 
 def record_single_chapter(job_id: str, build_id: str, manifest_path: Path) -> None:
     """Re-record one chapter of an existing build in-place."""
-    job = jobs[job_id]
-    job["status"] = "running"
+    job_set(job_id, status="running", started_at=datetime.utcnow().isoformat())
+    job = job_get(job_id)
     chapter_index = job["rechapter_index"]
     logger.info("[%s] Re-recording chapter %d of build %s", job_id[:8], chapter_index, build_id)
 
@@ -799,15 +914,15 @@ def record_single_chapter(job_id: str, build_id: str, manifest_path: Path) -> No
         clean_body = f"{title_line}.\n\n{clean_body}"
         chunks = split_into_chunks(clean_body, max_chars)
         total_chunks = len(chunks)
-        job["total_chunks"] = total_chunks
+        job_set(job_id, total_chunks=total_chunks)
         logger.info("[%s]   %d chunks to send", job_id[:8], total_chunks)
 
         audio_parts: list[bytes] = []
         for chunk_idx, chunk in enumerate(chunks):
-            if job.get("stop_requested"):
-                job["status"] = "stopped"
+            if _stop_flags.get(job_id):
+                job_set(job_id, status="stopped")
                 return
-            job["current_chunk"] = chunk_idx + 1
+            job_set(job_id, current_chunk=chunk_idx + 1)
             audio_data = call_kokoro(chunk, voice, speed)
             audio_parts.append(audio_data)
 
@@ -819,15 +934,13 @@ def record_single_chapter(job_id: str, build_id: str, manifest_path: Path) -> No
         ch_meta["chunk_count"] = total_chunks
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
-        job["status"] = "complete"
-        job["completed_at"] = datetime.utcnow().isoformat()
+        job_set(job_id, status="complete", completed_at=datetime.utcnow().isoformat())
         logger.info("[%s] Re-record complete — chapter %d", job_id[:8], chapter_index)
         fire_webhook({"event": "rechapter_complete", "job_id": job_id,
                       "build_id": build_id, "chapter_index": chapter_index})
 
     except Exception as exc:
-        job["status"] = "error"
-        job["error"] = str(exc)
+        job_set(job_id, status="error", error=str(exc))
         logger.error("[%s] Re-record failed: %s", job_id[:8], exc, exc_info=True)
         fire_webhook({"event": "error", "job_id": job_id, "error": str(exc)})
 
@@ -1197,7 +1310,7 @@ function pollStatus() {{
     const resp = await fetch(`/api/jobs/${{currentJobId}}`);
     const job = await resp.json();
     renderStatus(job);
-    if (['complete', 'stopped', 'error'].includes(job.status)) {{
+    if (['complete', 'stopped', 'error', 'interrupted'].includes(job.status)) {{
       clearInterval(pollTimer);
       localStorage.removeItem('chapterforge_job_id');
       document.getElementById('start-btn').disabled = false;
