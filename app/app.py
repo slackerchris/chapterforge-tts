@@ -12,6 +12,7 @@ import threading
 import time
 import subprocess
 import tempfile
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -24,6 +25,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("chapterforge")
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -34,6 +46,8 @@ DEFAULT_VOICE = os.environ.get("DEFAULT_VOICE", "af_bella")
 DEFAULT_SPEED = float(os.environ.get("DEFAULT_SPEED", "0.85"))
 DEFAULT_MAX_CHARS = int(os.environ.get("DEFAULT_MAX_CHARS", "1400"))
 CHAPTER_TRAIL_SILENCE = float(os.environ.get("CHAPTER_TRAIL_SILENCE", "3.0"))
+KOKORO_RETRIES = int(os.environ.get("KOKORO_RETRIES", "3"))  # attempts per chunk
+KOKORO_RETRY_DELAY = float(os.environ.get("KOKORO_RETRY_DELAY", "10.0"))  # seconds between retries
 APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 BOOKS_DIR = Path(os.environ.get("BOOKS_DIR", "/app/books"))
@@ -211,16 +225,36 @@ def split_into_chunks(text: str, max_chars: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def call_kokoro(text: str, voice: str, speed: float) -> bytes:
-    """Send a chunk to Kokoro and return raw audio bytes (WAV)."""
+    """Send a chunk to Kokoro and return raw audio bytes (WAV).
+
+    Retries up to KOKORO_RETRIES times on transient errors (timeouts, 5xx).
+    Raises on the final failure.
+    """
     payload = {
         "model": "kokoro",
         "voice": voice,
         "speed": speed,
         "input": text,
     }
-    resp = requests.post(KOKORO_ENDPOINT, json=payload, timeout=120)
-    resp.raise_for_status()
-    return resp.content
+    last_exc: Exception | None = None
+    for attempt in range(1, KOKORO_RETRIES + 1):
+        try:
+            resp = requests.post(KOKORO_ENDPOINT, json=payload, timeout=120)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as exc:
+            last_exc = exc
+            if attempt < KOKORO_RETRIES:
+                logger.warning(
+                    "Kokoro attempt %d/%d failed (%s) — retrying in %.0fs",
+                    attempt, KOKORO_RETRIES, exc, KOKORO_RETRY_DELAY,
+                )
+                time.sleep(KOKORO_RETRY_DELAY)
+            else:
+                logger.error(
+                    "Kokoro failed after %d attempts: %s", KOKORO_RETRIES, exc
+                )
+    raise last_exc
 
 
 def concat_chunks_to_mp3(audio_chunks: list[bytes], output_path: Path) -> None:
@@ -281,6 +315,8 @@ def record_job(job_id: str) -> None:
     job = jobs[job_id]
     job["status"] = "running"
     job["started_at"] = datetime.utcnow().isoformat()
+    logger.info("[%s] Job started — file: %s, voice: %s, speed: %s",
+                job_id[:8], job["filename"], job["voice"], job["speed"])
 
     try:
         manuscript_path = BOOKS_DIR / job["filename"]
@@ -306,6 +342,8 @@ def record_job(job_id: str) -> None:
 
         chapters = split_into_chapters(text)
         job["total_chapters"] = len(chapters)
+        logger.info("[%s] Build ID: %s — %d chapters found",
+                    job_id[:8], build_id, len(chapters))
 
         manifest = {
             "book": stem,
@@ -322,11 +360,15 @@ def record_job(job_id: str) -> None:
 
         for ch_idx, chapter in enumerate(chapters):
             if job.get("stop_requested"):
+                logger.info("[%s] Stop requested before chapter %d — halting",
+                            job_id[:8], ch_idx + 1)
                 job["status"] = "stopped"
                 return
 
             job["current_chapter"] = chapter["title"]
             job["current_chapter_index"] = ch_idx + 1
+            logger.info("[%s] Chapter %d/%d: %s",
+                        job_id[:8], ch_idx + 1, len(chapters), chapter["title"])
 
             clean_body = clean_markdown(chapter["body"])
             clean_body = apply_pronunciations(clean_body)
@@ -334,21 +376,32 @@ def record_job(job_id: str) -> None:
             total_chunks = len(chunks)
             job["total_chunks"] = total_chunks
             job["current_chunk"] = 0
+            logger.info("[%s]   %d chunks to send", job_id[:8], total_chunks)
 
             audio_parts: list[bytes] = []
 
             for chunk_idx, chunk in enumerate(chunks):
                 if job.get("stop_requested"):
+                    logger.info("[%s] Stop requested at chunk %d/%d — halting",
+                                job_id[:8], chunk_idx + 1, total_chunks)
                     job["status"] = "stopped"
                     return
 
                 job["current_chunk"] = chunk_idx + 1
-                audio_data = call_kokoro(chunk, voice, speed)
+                logger.debug("[%s]   Chunk %d/%d (%d chars)",
+                             job_id[:8], chunk_idx + 1, total_chunks, len(chunk))
+                try:
+                    audio_data = call_kokoro(chunk, voice, speed)
+                except Exception as kokoro_exc:
+                    logger.error("[%s]   Kokoro failed on chunk %d/%d: %s",
+                                 job_id[:8], chunk_idx + 1, total_chunks, kokoro_exc)
+                    raise
                 audio_parts.append(audio_data)
 
             # Concatenate WAV chunks → MP3 via ffmpeg
             chapter_filename = f"{ch_idx + 1:02d}_{_safe_slug(chapter['title'])}.mp3"
             chapter_path = build_dir / chapter_filename
+            logger.info("[%s]   Encoding %s", job_id[:8], chapter_filename)
             concat_chunks_to_mp3(audio_parts, chapter_path)
 
             manifest["chapters"].append(
@@ -366,10 +419,12 @@ def record_job(job_id: str) -> None:
 
         job["status"] = "complete"
         job["completed_at"] = datetime.utcnow().isoformat()
+        logger.info("[%s] Job complete — build: %s", job_id[:8], build_id)
 
     except Exception as exc:
         job["status"] = "error"
         job["error"] = str(exc)
+        logger.error("[%s] Job failed: %s", job_id[:8], exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +516,12 @@ async def list_manuscripts():
         [f.name for f in BOOKS_DIR.iterdir() if f.is_file() and f.suffix in (".md", ".txt")]
     )
     return {"manuscripts": files}
+
+
+@app.get("/api/jobs")
+async def list_jobs():
+    """Return all jobs, most recent first. Used by the UI to reconnect after a page reload."""
+    return list(reversed(list(jobs.values())))
 
 
 @app.get("/build/{build_id}")
@@ -617,6 +678,26 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
 let currentJobId = null;
 let pollTimer = null;
 
+// On load, check localStorage for an in-progress job and reconnect if still active
+window.addEventListener('DOMContentLoaded', async () => {{
+  const saved = localStorage.getItem('chapterforge_job_id');
+  if (saved) {{
+    const resp = await fetch(`/api/jobs/${{saved}}`);
+    if (resp.ok) {{
+      const job = await resp.json();
+      if (['queued', 'running', 'stopping'].includes(job.status)) {{
+        currentJobId = saved;
+        document.getElementById('start-btn').disabled = true;
+        document.getElementById('stop-btn').disabled = job.status === 'stopping';
+        renderStatus(job);
+        pollStatus();
+      }} else {{
+        localStorage.removeItem('chapterforge_job_id');
+      }}
+    }}
+  }}
+}});
+
 async function uploadFile() {{
   const input = document.getElementById('file-input');
   const status = document.getElementById('upload-status');
@@ -654,6 +735,7 @@ async function startJob() {{
   }});
   const data = await resp.json();
   currentJobId = data.job_id;
+  localStorage.setItem('chapterforge_job_id', currentJobId);
   document.getElementById('start-btn').disabled = true;
   document.getElementById('stop-btn').disabled = false;
   pollStatus();
@@ -674,6 +756,7 @@ function pollStatus() {{
     renderStatus(job);
     if (['complete', 'stopped', 'error'].includes(job.status)) {{
       clearInterval(pollTimer);
+      localStorage.removeItem('chapterforge_job_id');
       document.getElementById('start-btn').disabled = false;
       document.getElementById('stop-btn').disabled = true;
       if (job.status === 'complete') location.reload();
