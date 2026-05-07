@@ -4,10 +4,13 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*.*.*"
   workflow_dispatch:
 
 env:
   IMAGE_NAME: chapterforge-tts
+  REGISTRY: ghcr.io
 
 jobs:
   build-and-push:
@@ -24,18 +27,29 @@ jobs:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set lowercase image owner
-        run: echo "IMAGE_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # v1.2.3 tag → image tags 1.2.3 and 1.2 and 1
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # main branch → latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            # short SHA always included
+            type=sha,prefix=sha-,format=short
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:latest
-            ghcr.io/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
