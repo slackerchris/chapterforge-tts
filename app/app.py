@@ -75,6 +75,7 @@ CHAPTER_TRAIL_SILENCE = float(os.environ.get("CHAPTER_TRAIL_SILENCE", "3.0"))
 KOKORO_RETRIES = int(os.environ.get("KOKORO_RETRIES", "3"))  # attempts per chunk
 KOKORO_RETRY_DELAY = float(os.environ.get("KOKORO_RETRY_DELAY", "10.0"))  # seconds between retries
 KOKORO_TIMEOUT = float(os.environ.get("KOKORO_TIMEOUT", "300.0"))  # seconds per request
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")  # optional POST on job complete/error
 APP_VERSION = os.environ.get("APP_VERSION", "dev")
 
 BOOKS_DIR = Path(os.environ.get("BOOKS_DIR", "/app/books"))
@@ -420,6 +421,17 @@ def _safe_slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
+def fire_webhook(payload: dict) -> None:
+    """POST job status payload to WEBHOOK_URL if configured. Non-fatal."""
+    if not WEBHOOK_URL:
+        return
+    try:
+        requests.post(WEBHOOK_URL, json=payload, timeout=10)
+        logger.info("Webhook fired: %s", WEBHOOK_URL)
+    except Exception as exc:
+        logger.warning("Webhook failed: %s", exc)
+
+
 def record_job(job_id: str) -> None:
     job = jobs[job_id]
     job["status"] = "running"
@@ -543,11 +555,14 @@ def record_job(job_id: str) -> None:
         job["status"] = "complete"
         job["completed_at"] = datetime.utcnow().isoformat()
         logger.info("[%s] Job complete — build: %s", job_id[:8], build_id)
+        fire_webhook({"event": "complete", "job_id": job_id, "build_id": build_id,
+                      "book": stem, "chapters": len(manifest["chapters"])})
 
     except Exception as exc:
         job["status"] = "error"
         job["error"] = str(exc)
         logger.error("[%s] Job failed: %s", job_id[:8], exc, exc_info=True)
+        fire_webhook({"event": "error", "job_id": job_id, "error": str(exc)})
 
 
 # ---------------------------------------------------------------------------
@@ -715,6 +730,108 @@ async def download_build(build_id: str):
     )
 
 
+@app.post("/build/{build_id}/rechapter/{chapter_index}")
+async def rechapter(build_id: str, chapter_index: int, background_tasks: BackgroundTasks):
+    """Re-record a single chapter in an existing build."""
+    if ".." in build_id or "/" in build_id:
+        raise HTTPException(status_code=400, detail="Invalid build ID.")
+    build_dir = OUTPUT_DIR / "chapters" / build_id
+    manifest_path = build_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise HTTPException(status_code=404, detail="Build not found.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    chapters_meta = manifest.get("chapters", [])
+    ch_meta = next((c for c in chapters_meta if c["chapter_index"] == chapter_index), None)
+    if ch_meta is None:
+        raise HTTPException(status_code=404, detail=f"Chapter {chapter_index} not found in manifest.")
+
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {
+        "job_id": job_id,
+        "filename": manifest["source_file"],
+        "voice": manifest["voice"],
+        "speed": manifest["speed"],
+        "max_chars": manifest.get("max_chars", DEFAULT_MAX_CHARS),
+        "status": "queued",
+        "created_at": datetime.utcnow().isoformat(),
+        "current_chapter": ch_meta["title"],
+        "current_chapter_index": chapter_index,
+        "total_chapters": 1,
+        "current_chunk": 0,
+        "total_chunks": 0,
+        "build_id": build_id,
+        "error": None,
+        "stop_requested": False,
+        "rechapter_index": chapter_index,
+    }
+    background_tasks.add_task(record_single_chapter, job_id, build_id, manifest_path)
+    return {"job_id": job_id, "chapter_index": chapter_index}
+
+
+def record_single_chapter(job_id: str, build_id: str, manifest_path: Path) -> None:
+    """Re-record one chapter of an existing build in-place."""
+    job = jobs[job_id]
+    job["status"] = "running"
+    chapter_index = job["rechapter_index"]
+    logger.info("[%s] Re-recording chapter %d of build %s", job_id[:8], chapter_index, build_id)
+
+    try:
+        build_dir = OUTPUT_DIR / "chapters" / build_id
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        ch_meta = next(c for c in manifest["chapters"] if c["chapter_index"] == chapter_index)
+
+        manuscript_path = BOOKS_DIR / manifest["source_file"]
+        text = manuscript_path.read_text(encoding="utf-8")
+        all_chapters = split_into_chapters(text)
+
+        chapter = next((c for i, c in enumerate(all_chapters) if i + 1 == chapter_index), None)
+        if chapter is None:
+            raise ValueError(f"Chapter {chapter_index} not found in manuscript.")
+
+        voice = manifest["voice"]
+        speed = manifest["speed"]
+        max_chars = manifest.get("max_chars", DEFAULT_MAX_CHARS)
+        stem = manifest["book"]
+
+        clean_body = clean_markdown(chapter["body"])
+        clean_body = apply_pronunciations(clean_body)
+        title_line = apply_pronunciations(chapter["title"])
+        clean_body = f"{title_line}.\n\n{clean_body}"
+        chunks = split_into_chunks(clean_body, max_chars)
+        total_chunks = len(chunks)
+        job["total_chunks"] = total_chunks
+        logger.info("[%s]   %d chunks to send", job_id[:8], total_chunks)
+
+        audio_parts: list[bytes] = []
+        for chunk_idx, chunk in enumerate(chunks):
+            if job.get("stop_requested"):
+                job["status"] = "stopped"
+                return
+            job["current_chunk"] = chunk_idx + 1
+            audio_data = call_kokoro(chunk, voice, speed)
+            audio_parts.append(audio_data)
+
+        chapter_path = build_dir / ch_meta["output_mp3"]
+        logger.info("[%s]   Encoding %s", job_id[:8], ch_meta["output_mp3"])
+        concat_chunks_to_mp3(audio_parts, chapter_path)
+        tag_mp3(chapter_path, title=chapter["title"], track=chapter_index, album=stem)
+
+        ch_meta["chunk_count"] = total_chunks
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        job["status"] = "complete"
+        job["completed_at"] = datetime.utcnow().isoformat()
+        logger.info("[%s] Re-record complete — chapter %d", job_id[:8], chapter_index)
+        fire_webhook({"event": "rechapter_complete", "job_id": job_id,
+                      "build_id": build_id, "chapter_index": chapter_index})
+
+    except Exception as exc:
+        job["status"] = "error"
+        job["error"] = str(exc)
+        logger.error("[%s] Re-record failed: %s", job_id[:8], exc, exc_info=True)
+        fire_webhook({"event": "error", "job_id": job_id, "error": str(exc)})
+
+
 @app.get("/build/{build_id}/download/m4b")
 async def download_m4b(build_id: str):
     """Return the M4B audiobook file for a build."""
@@ -786,6 +903,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
             f'<audio controls src="/audio/{b["build_id"]}/{ch["output_mp3"]}"></audio>'
             f' {ch["title"]}'
             f' <a href="/audio/{b["build_id"]}/{ch["output_mp3"]}" download="{ch["output_mp3"]}" title="Download chapter" style="color:#e8c96e;font-size:0.8rem;margin-left:0.4rem;">&#8681;</a>'
+            f' <button onclick="rechapter(\'{b["build_id"]}\',{ch["chapter_index"]},this)" title="Re-record this chapter" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;margin-left:0.3rem;">&#8635;</button>'
             f'</li>'
             for ch in b.get("chapters", [])
         )
@@ -1024,6 +1142,39 @@ async function previewChapters() {{
     `<tr><td>${{ch.index}}</td><td>${{ch.title}}</td><td>${{ch.word_count.toLocaleString()}} w</td></tr>`
   ).join('');
   panel.innerHTML = `<strong>${{data.chapter_count}} chapters</strong><table>${{rows}}</table>`;
+}}
+
+async function rechapter(buildId, chapterIndex, btn) {{
+  if (!confirm(`Re-record chapter ${{chapterIndex}}? This will overwrite the existing audio.`)) return;
+  btn.disabled = true;
+  btn.textContent = '⏳';
+  try {{
+    const resp = await fetch(`/build/${{buildId}}/rechapter/${{chapterIndex}}`, {{ method: 'POST' }});
+    if (!resp.ok) {{ alert('Failed to start re-record.'); return; }}
+    const data = await resp.json();
+    pollRechapter(data.job_id, btn);
+  }} catch (e) {{
+    btn.disabled = false;
+    btn.textContent = '&#8635;';
+  }}
+}}
+
+function pollRechapter(jobId, btn) {{
+  const t = setInterval(async () => {{
+    const resp = await fetch(`/api/jobs/${{jobId}}`);
+    const job = await resp.json();
+    if (job.status === 'complete') {{
+      clearInterval(t);
+      btn.disabled = false;
+      btn.textContent = '&#8635;';
+      location.reload();
+    }} else if (['error', 'stopped'].includes(job.status)) {{
+      clearInterval(t);
+      btn.disabled = false;
+      btn.textContent = '&#8635;';
+      alert(`Re-record failed: ${{job.error || job.status}}`);
+    }}
+  }}, 2000);
 }}
 
 function pollStatus() {{
