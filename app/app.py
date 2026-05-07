@@ -13,6 +13,7 @@ import time
 import subprocess
 import tempfile
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -28,11 +29,25 @@ from pydantic import BaseModel
 # Logging
 # ---------------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+_LOG_DIR = Path("/app/logs")
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_formatter = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(_formatter)
+
+_file_handler = RotatingFileHandler(
+    _LOG_DIR / "chapterforge.log",
+    maxBytes=10 * 1024 * 1024,  # 10 MB per file
+    backupCount=5,
+)
+_file_handler.setFormatter(_formatter)
+
+logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
 logger = logging.getLogger("chapterforge")
 
 # ---------------------------------------------------------------------------
@@ -372,6 +387,9 @@ def record_job(job_id: str) -> None:
 
             clean_body = clean_markdown(chapter["body"])
             clean_body = apply_pronunciations(clean_body)
+            # Prepend the chapter title so it is spoken at the start of the audio
+            title_line = apply_pronunciations(chapter["title"])
+            clean_body = f"{title_line}.\n\n{clean_body}"
             chunks = split_into_chunks(clean_body, max_chars)
             total_chunks = len(chunks)
             job["total_chunks"] = total_chunks
