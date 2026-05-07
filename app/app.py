@@ -1135,7 +1135,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
   <label>Sample text</label>
   <input type="text" id="preview-text" value="The sunstone pulsed with a cold light, and she felt the Weave tighten.">
   <div style="display:flex;gap:0.5rem;align-items:center;">
-    <button onclick="playVoicePreview()" id="preview-btn">&#9654; Play Preview</button>
+    <button onclick="playVoicePreview()" id="preview-btn">▶ Play Preview</button>
     <audio id="preview-player" controls style="flex:1;display:none;"></audio>
   </div>
 </section>
@@ -1238,13 +1238,13 @@ async function playVoicePreview() {{
       headers: {{ 'Content-Type': 'application/json' }},
       body: JSON.stringify({{ text, voice, speed }})
     }});
-    if (!resp.ok) {{ btn.textContent = '&#9654; Play Preview'; btn.disabled = false; return; }}
+    if (!resp.ok) {{ btn.textContent = '▶ Play Preview'; btn.disabled = false; return; }}
     const blob = await resp.blob();
     player.src = URL.createObjectURL(blob);
     player.style.display = 'block';
     player.play();
   }} finally {{
-    btn.textContent = '&#9654; Play Preview';
+    btn.textContent = '▶ Play Preview';
     btn.disabled = false;
   }}
 }}
