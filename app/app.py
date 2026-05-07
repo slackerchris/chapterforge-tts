@@ -1483,13 +1483,28 @@ const KOKORO_VOICES = [
   ['🇬🇧 British Male',    ['bm_george','bm_lewis']],
 ];
 
+// Parse "af_bella(0.6)+bm_george(0.4)" → [{voice, weight}, ...]
+// Single voice "af_bella" → [{voice:'af_bella', weight:1.0}]
+function parseBlend(str) {{
+  if (!str) return [{{voice: '{DEFAULT_VOICE}', weight: 1.0}}];
+  const parts = str.split('+').map(s => s.trim()).filter(Boolean);
+  return parts.map(p => {{
+    const m = p.match(/^([\\w]+)\\(([\\d.]+)\\)$/);
+    if (m) return {{voice: m[1], weight: parseFloat(m[2])}};
+    return {{voice: p, weight: 1.0}};
+  }});
+}}
+
+// [{voice, weight}, ...] → "af_bella(0.6)+bm_george(0.4)" or "af_bella" if single full-weight
+function buildBlend(slots) {{
+  const filtered = slots.filter(s => s.voice);
+  if (filtered.length === 1 && filtered[0].weight === 1.0) return filtered[0].voice;
+  return filtered.map(s => s.voice + '(' + s.weight + ')').join('+');
+}}
+
 function voiceSelectHtml(id, selectedVal) {{
-  const sStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;width:100%;';
-  const known = KOKORO_VOICES.flatMap(g => g[1]);
+  const sStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;flex:1;min-width:0;';
   let s = '<select id="' + id + '" style="' + sStyle + '">';
-  if (selectedVal && !known.includes(selectedVal)) {{
-    s += '<option value="' + selectedVal + '" selected>' + selectedVal + '</option>';
-  }}
   for (const [label, voices] of KOKORO_VOICES) {{
     s += '<optgroup label="' + label + '">';
     for (const v of voices) {{
@@ -1501,6 +1516,72 @@ function voiceSelectHtml(id, selectedVal) {{
   return s;
 }}
 
+function blendBuilderHtml(prefix, blendStr) {{
+  const iStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;';
+  const slots = parseBlend(blendStr);
+  let html = '<div id="blend_' + prefix + '" style="display:flex;flex-direction:column;gap:0.25rem;">';
+  slots.forEach((slot, i) => {{
+    html += '<div style="display:flex;gap:0.3rem;align-items:center;">';
+    html += voiceSelectHtml('bv_' + prefix + '_' + i, slot.voice);
+    html += '<input id="bw_' + prefix + '_' + i + '" type="number" value="' + slot.weight + '" step="0.05" min="0.05" max="1.0" title="weight" style="width:4rem;' + iStyle + '">';
+    if (i > 0) {{
+      html += '<button onclick="removeBlendSlot(\'' + prefix + '\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
+    }} else {{
+      html += '<button onclick="addBlendSlot(\'' + prefix + '\')" style="background:#333;color:#ccc;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;" title="Add voice to blend">+</button>';
+    }}
+    html += '</div>';
+  }});
+  html += '</div>';
+  return html;
+}}
+
+function countBlendSlots(prefix) {{
+  let i = 0;
+  while (document.getElementById('bv_' + prefix + '_' + i)) i++;
+  return i;
+}}
+
+function readBlendSlots(prefix) {{
+  const slots = [];
+  let i = 0;
+  while (true) {{
+    const vEl = document.getElementById('bv_' + prefix + '_' + i);
+    if (!vEl) break;
+    const wEl = document.getElementById('bw_' + prefix + '_' + i);
+    slots.push({{voice: vEl.value, weight: parseFloat(wEl.value)}});
+    i++;
+  }}
+  return slots;
+}}
+
+function addBlendSlot(prefix) {{
+  const container = document.getElementById('blend_' + prefix);
+  if (!container) return;
+  const i = countBlendSlots(prefix);
+  const iStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;';
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;gap:0.3rem;align-items:center;';
+  row.innerHTML = voiceSelectHtml('bv_' + prefix + '_' + i, '{DEFAULT_VOICE}') +
+    '<input id="bw_' + prefix + '_' + i + '" type="number" value="0.5" step="0.05" min="0.05" max="1.0" title="weight" style="width:4rem;' + iStyle + '">' +
+    '<button onclick="removeBlendSlot(\'' + prefix + '\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
+  container.appendChild(row);
+}}
+
+function removeBlendSlot(prefix, idx) {{
+  // Re-render: collect remaining slots, rebuild blend string, re-render table
+  const slots = readBlendSlots(prefix).filter((_, i) => i !== idx);
+  const blendStr = buildBlend(slots);
+  // Find which character this prefix belongs to
+  if (prefix === 'new') {{
+    // Rebuild the new-row blend cell only
+    const cell = document.getElementById('blend_new').parentElement;
+    cell.innerHTML = blendBuilderHtml('new', blendStr);
+  }} else {{
+    voicesData[prefix].voice = blendStr;
+    renderVoicesTable();
+  }}
+}}
+
 function renderVoicesTable() {{
   const container = document.getElementById('voices-container');
   if (!container) return;
@@ -1508,7 +1589,7 @@ function renderVoicesTable() {{
   let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
   html += '<thead><tr style="color:#666;border-bottom:1px solid #333">';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Character</th>';
-  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Voice</th>';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Voice / Blend</th>';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Speed</th>';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Pitch</th>';
   html += '<th></th></tr></thead><tbody>';
@@ -1518,8 +1599,8 @@ function renderVoicesTable() {{
   for (const [name, p] of Object.entries(voicesData)) {{
     const nc = name === 'narrator' ? '#e8c96e' : '#ccc';
     html += '<tr>';
-    html += '<td style="padding:0.3rem 0.4rem;color:' + nc + '">' + name + '</td>';
-    html += '<td style="padding:0.3rem 0.4rem">' + voiceSelectHtml('vv_' + name, p.voice || '{DEFAULT_VOICE}') + '</td>';
+    html += '<td style="padding:0.3rem 0.4rem;color:' + nc + ';white-space:nowrap">' + name + '</td>';
+    html += '<td style="padding:0.3rem 0.4rem">' + blendBuilderHtml(name, p.voice || '{DEFAULT_VOICE}') + '</td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vs_' + name + '" type="number" value="' + (p.speed !== undefined ? p.speed : 0.85) + '" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
@@ -1531,7 +1612,7 @@ function renderVoicesTable() {{
   }}
   html += '</tbody><tfoot><tr style="border-top:1px solid #333">';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-name" type="text" placeholder="name" style="width:100%;' + iStyle + '"></td>';
-  html += '<td style="padding:0.4rem 0.4rem">' + voiceSelectHtml('new-char-voice', '{DEFAULT_VOICE}') + '</td>';
+  html += '<td style="padding:0.4rem 0.4rem">' + blendBuilderHtml('new', '{DEFAULT_VOICE}') + '</td>';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-speed" type="number" value="{DEFAULT_SPEED}" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-pitch" type="number" value="1.0" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem;white-space:nowrap">';
@@ -1549,12 +1630,12 @@ function renderVoicesTable() {{
 function collectVoicesData() {{
   const data = {{}};
   for (const name of Object.keys(voicesData)) {{
-    const vEl = document.getElementById('vv_' + name);
+    const slots = readBlendSlots(name);
     const sEl = document.getElementById('vs_' + name);
     const pEl = document.getElementById('vp_' + name);
-    if (vEl) {{
+    if (slots.length && sEl) {{
       data[name] = {{
-        voice: vEl.value.trim(),
+        voice: buildBlend(slots),
         speed: parseFloat(sEl.value),
         pitch_ratio: parseFloat(pEl.value),
       }};
@@ -1565,17 +1646,15 @@ function collectVoicesData() {{
 
 function addCharVoice() {{
   const nameInput = document.getElementById('new-char-name');
-  const voiceInput = document.getElementById('new-char-voice');
-  const speedInput = document.getElementById('new-char-speed');
-  const pitchInput = document.getElementById('new-char-pitch');
   const name = nameInput.value.trim().toLowerCase().replace(/\\s+/g, '_');
   if (!name) return;
   const current = collectVoicesData();
   if (!current.hasOwnProperty(name)) {{
+    const slots = readBlendSlots('new');
     current[name] = {{
-      voice: voiceInput.value.trim() || '{DEFAULT_VOICE}',
-      speed: parseFloat(speedInput.value) || {DEFAULT_SPEED},
-      pitch_ratio: parseFloat(pitchInput.value) || 1.0,
+      voice: buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}', weight: 1.0}}]),
+      speed: parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED},
+      pitch_ratio: parseFloat(document.getElementById('new-char-pitch').value) || 1.0,
     }};
   }}
   voicesData = current;
@@ -1605,7 +1684,8 @@ async function saveVoices() {{
 }}
 
 async function testNewCharVoice() {{
-  const voice = (document.getElementById('new-char-voice').value.trim()) || '{DEFAULT_VOICE}';
+  const slots = readBlendSlots('new');
+  const voice = buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}', weight: 1.0}}]);
   const speed = parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED};
   const text = document.getElementById('preview-text').value.trim() ||
     'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
