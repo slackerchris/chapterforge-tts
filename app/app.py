@@ -57,7 +57,23 @@ jobs: dict[str, dict] = {}
 # ---------------------------------------------------------------------------
 
 CHAPTER_HEADING_RE = re.compile(
-    r"^#{1,2}\s+(chapter\s+\d+|ch\.?\s*\d+|prologue|epilogue|part\s+\d+).*",
+    r"^#{1,3}\s+("
+    r"chapter\s+[\divxlc]+"       # Chapter 1, Chapter IV
+    r"|ch\.?\s*[\divxlc]+"        # Ch 1, Ch. IV
+    r"|prologue"
+    r"|epilogue"
+    r"|part\s+[\divxlc]+"         # Part 1, Part II
+    r"|act\s+[\divxlc]+"          # Act 1, Act II
+    r"|interlude(?:\s+[\divxlc]+|\s+\w+)?"  # Interlude, Interlude 1, Interlude: The Rift
+    r"|journal(?:\s+[\divxlc]+|\s+\w+)?"    # Journal, Journal 1, Journal: Anya
+    r"|entry(?:\s+[\divxlc]+)?"   # Entry 1, Entry IV
+    r"|scene\s+[\divxlc]+"        # Scene 1
+    r"|coda"
+    r"|afterword"
+    r"|foreword"
+    r"|preface"
+    r"|introduction"
+    r").*",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -70,17 +86,26 @@ def strip_frontmatter(text: str) -> str:
 
 def clean_markdown(text: str) -> str:
     """Remove Markdown syntax that Kokoro should not read aloud."""
+    # Strip chapter metadata lines: italic lines containing | separators
+    # e.g. *~25 Frostis, AS 2846 | POV: Rotating | ~5,400 words*
+    text = re.sub(r"^\*[^*\n]*\|[^*\n]*\*\s*$", "", text, flags=re.MULTILINE)
+    # Strip any remaining bare metadata lines (after italic stripping) with | separators
+    # e.g. ~25 Frostis, AS 2846 | POV: Rotating | ~5,400 words
+    text = re.sub(r"^~[^\n]*\|[^\n]*$", "", text, flags=re.MULTILINE)
+    # Replace scene break dividers (---) with a paragraph break pause
+    # A blank line is enough for a natural breath; no narrated text needed
+    text = re.sub(r"^[-*_]{3,}\s*$", "\n", text, flags=re.MULTILINE)
     # Bold/italic
-    text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
-    text = re.sub(r"_{1,3}(.+?)_{1,3}", r"\1", text)
+    text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"_{1,3}(.+?)_{1,3}", r"\1", text, flags=re.DOTALL)
     # Inline code
     text = re.sub(r"`(.+?)`", r"\1", text)
     # Links [text](url)
     text = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", text)
     # Remaining heading hashes
     text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
-    # Horizontal rules
-    text = re.sub(r"^[-*_]{3,}\s*$", "", text, flags=re.MULTILINE)
+    # Collapse excess blank lines left by stripping
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
