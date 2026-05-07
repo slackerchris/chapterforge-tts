@@ -33,6 +33,7 @@ KOKORO_ENDPOINT = os.environ.get(
 DEFAULT_VOICE = os.environ.get("DEFAULT_VOICE", "af_bella")
 DEFAULT_SPEED = float(os.environ.get("DEFAULT_SPEED", "0.85"))
 DEFAULT_MAX_CHARS = int(os.environ.get("DEFAULT_MAX_CHARS", "1400"))
+CHAPTER_TRAIL_SILENCE = float(os.environ.get("CHAPTER_TRAIL_SILENCE", "3.0"))
 
 BOOKS_DIR = Path(os.environ.get("BOOKS_DIR", "/app/books"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/output"))
@@ -221,6 +222,22 @@ def concat_chunks_to_mp3(audio_chunks: list[bytes], output_path: Path) -> None:
             p = tmp / f"chunk_{i:04d}.wav"
             p.write_bytes(data)
             chunk_paths.append(p)
+
+        # Append trailing silence so chapters don't end abruptly
+        if CHAPTER_TRAIL_SILENCE > 0:
+            silence_path = tmp / "silence.wav"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi",
+                    "-i", f"anullsrc=r=24000:cl=mono",
+                    "-t", str(CHAPTER_TRAIL_SILENCE),
+                    str(silence_path),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            chunk_paths.append(silence_path)
 
         list_file = tmp / "chunks.txt"
         list_file.write_text(
