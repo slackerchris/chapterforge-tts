@@ -1479,15 +1479,7 @@ async function loadVoices() {{
 function renderVoicesTable() {{
   const container = document.getElementById('voices-container');
   if (!container) return;
-  if (Object.keys(voicesData).length === 0) {{
-    container.innerHTML = '<p style="color:#666;font-size:0.85rem">No voices configured. Add a <strong>narrator</strong> entry to override the default voice per-book.</p>' +
-      '<div style="display:flex;gap:0.5rem;margin-top:0.6rem;align-items:center;">' +
-      '<input id="new-char-name" type="text" placeholder="character name" style="width:10rem;background:#222;border:1px solid #444;color:#eee;padding:0.3rem 0.5rem;border-radius:3px;font-size:0.85rem;">' +
-      '<button onclick="addCharVoice()" style="background:#333;color:#ccc;">+ Add</button>' +
-      '<button onclick="saveVoices()" style="margin-left:auto;">Save Voices</button>' +
-      '</div>';
-    return;
-  }}
+  const iStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;';
   let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
   html += '<thead><tr style="color:#666;border-bottom:1px solid #333">';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Character</th>';
@@ -1495,13 +1487,16 @@ function renderVoicesTable() {{
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Speed</th>';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Pitch</th>';
   html += '<th></th></tr></thead><tbody>';
+  if (Object.keys(voicesData).length === 0) {{
+    html += '<tr><td colspan="5" style="color:#555;padding:0.4rem 0.4rem;font-size:0.8rem;font-style:italic">No characters yet. Add a <strong style="color:#666">narrator</strong> row to override the default voice per-book.</td></tr>';
+  }}
   for (const [name, p] of Object.entries(voicesData)) {{
     const nc = name === 'narrator' ? '#e8c96e' : '#ccc';
     html += '<tr>';
     html += '<td style="padding:0.3rem 0.4rem;color:' + nc + '">' + name + '</td>';
-    html += '<td style="padding:0.3rem 0.4rem"><input id="vv_' + name + '" type="text" value="' + (p.voice || '') + '" style="width:100%;background:#222;border:1px solid #444;color:#eee;padding:0.2rem 0.4rem;border-radius:3px;font-size:0.8rem;"></td>';
-    html += '<td style="padding:0.3rem 0.4rem"><input id="vs_' + name + '" type="number" value="' + (p.speed !== undefined ? p.speed : 0.85) + '" step="0.05" min="0.5" max="2.0" style="width:5.5rem;background:#222;border:1px solid #444;color:#eee;padding:0.2rem;border-radius:3px;font-size:0.8rem;"></td>';
-    html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;background:#222;border:1px solid #444;color:#eee;padding:0.2rem;border-radius:3px;font-size:0.8rem;"></td>';
+    html += '<td style="padding:0.3rem 0.4rem"><input id="vv_' + name + '" type="text" value="' + (p.voice || '') + '" style="width:100%;' + iStyle + '"></td>';
+    html += '<td style="padding:0.3rem 0.4rem"><input id="vs_' + name + '" type="number" value="' + (p.speed !== undefined ? p.speed : 0.85) + '" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
+    html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
     html += '<button data-name="' + name + '" onclick="testCharVoice(this.dataset.name)" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;">Test</button>';
     if (name !== 'narrator') {{
@@ -1509,11 +1504,18 @@ function renderVoicesTable() {{
     }}
     html += '</td></tr>';
   }}
-  html += '</tbody></table>';
-  html += '<div style="display:flex;gap:0.5rem;margin-top:0.8rem;align-items:center;">';
-  html += '<input id="new-char-name" type="text" placeholder="character name" style="width:10rem;background:#222;border:1px solid #444;color:#eee;padding:0.3rem 0.5rem;border-radius:3px;font-size:0.85rem;">';
+  html += '</tbody><tfoot><tr style="border-top:1px solid #333">';
+  html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-name" type="text" placeholder="name" style="width:100%;' + iStyle + '"></td>';
+  html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-voice" type="text" placeholder="voice or blend" style="width:100%;' + iStyle + '"></td>';
+  html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-speed" type="number" value="{DEFAULT_SPEED}" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
+  html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-pitch" type="number" value="1.0" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
+  html += '<td style="padding:0.4rem 0.4rem;white-space:nowrap">';
+  html += '<button onclick="testNewCharVoice()" style="background:#333;color:#ccc;margin-right:0.3rem;">▶ Test</button>';
   html += '<button onclick="addCharVoice()" style="background:#333;color:#ccc;">+ Add</button>';
-  html += '<button onclick="saveVoices()" style="margin-left:auto;">Save Voices</button>';
+  html += '</td>';
+  html += '</tr></tfoot></table>';
+  html += '<div style="display:flex;justify-content:flex-end;margin-top:0.6rem;">';
+  html += '<button onclick="saveVoices()">Save Voices</button>';
   html += '</div>';
   html += '<audio id="char-preview-player" style="display:none;margin-top:0.5rem;width:100%;" controls></audio>';
   container.innerHTML = html;
@@ -1538,15 +1540,21 @@ function collectVoicesData() {{
 
 function addCharVoice() {{
   const nameInput = document.getElementById('new-char-name');
-  const name = nameInput.value.trim().toLowerCase().replace(/\s+/g, '_');
+  const voiceInput = document.getElementById('new-char-voice');
+  const speedInput = document.getElementById('new-char-speed');
+  const pitchInput = document.getElementById('new-char-pitch');
+  const name = nameInput.value.trim().toLowerCase().replace(/\\s+/g, '_');
   if (!name) return;
   const current = collectVoicesData();
   if (!current.hasOwnProperty(name)) {{
-    current[name] = {{ voice: '{DEFAULT_VOICE}', speed: {DEFAULT_SPEED}, pitch_ratio: 1.0 }};
+    current[name] = {{
+      voice: voiceInput.value.trim() || '{DEFAULT_VOICE}',
+      speed: parseFloat(speedInput.value) || {DEFAULT_SPEED},
+      pitch_ratio: parseFloat(pitchInput.value) || 1.0,
+    }};
   }}
   voicesData = current;
   renderVoicesTable();
-  nameInput.value = '';
 }}
 
 function removeCharVoice(name) {{
@@ -1568,6 +1576,33 @@ async function saveVoices() {{
     alert('Voices saved.');
   }} else {{
     alert('Failed to save voices.');
+  }}
+}}
+
+async function testNewCharVoice() {{
+  const voice = (document.getElementById('new-char-voice').value.trim()) || '{DEFAULT_VOICE}';
+  const speed = parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED};
+  const text = document.getElementById('preview-text').value.trim() ||
+    'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
+  const btn = document.querySelector('button[onclick="testNewCharVoice()"]');
+  if (btn) {{ btn.disabled = true; btn.textContent = '\u2026'; }}
+  try {{
+    const resp = await fetch('/api/preview/voice', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ text, voice, speed }})
+    }});
+    if (resp.ok) {{
+      const blob = await resp.blob();
+      const player = document.getElementById('char-preview-player');
+      if (player) {{
+        player.src = URL.createObjectURL(blob);
+        player.style.display = 'block';
+        player.play();
+      }}
+    }}
+  }} finally {{
+    if (btn) {{ btn.disabled = false; btn.textContent = '\u25b6 Test'; }}
   }}
 }}
 
