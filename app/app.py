@@ -1483,8 +1483,8 @@ const KOKORO_VOICES = [
   ['🇬🇧 British Male',    ['bm_george','bm_lewis']],
 ];
 
-// Parse "af_bella(0.6)+bm_george(0.4)" → [{voice, weight}, ...]
-// Single voice "af_bella" → [{voice:'af_bella', weight:1.0}]
+// Parse "af_bella(0.6)+bm_george(0.4)" → [{{voice, weight}}, ...]
+// Single voice "af_bella" → [{{voice:'af_bella', weight:1.0}}]
 function parseBlend(str) {{
   if (!str) return [{{voice: '{DEFAULT_VOICE}', weight: 1.0}}];
   const parts = str.split('+').map(s => s.trim()).filter(Boolean);
