@@ -36,6 +36,7 @@ DEFAULT_MAX_CHARS = int(os.environ.get("DEFAULT_MAX_CHARS", "1400"))
 
 BOOKS_DIR = Path(os.environ.get("BOOKS_DIR", "/app/books"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/output"))
+PRONUNCIATIONS_FILE = Path(os.environ.get("PRONUNCIATIONS_FILE", "/app/books/pronunciations.json"))
 
 BOOKS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -130,6 +131,33 @@ def split_into_chapters(text: str) -> list[dict]:
         chapters.append({"title": "Chapter 1", "body": text.strip()})
 
     return [c for c in chapters if c["body"]]
+
+
+def load_pronunciations() -> dict[str, str]:
+    """Load word substitutions from pronunciations.json if it exists."""
+    if PRONUNCIATIONS_FILE.exists():
+        try:
+            return json.loads(PRONUNCIATIONS_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def apply_pronunciations(text: str) -> str:
+    """Replace words/phrases with their phonetic equivalents.
+
+    Substitutions are whole-word matches (case-insensitive) unless the key
+    contains spaces, in which case the phrase is matched literally.
+    """
+    subs = load_pronunciations()
+    for word, replacement in subs.items():
+        if " " in word:
+            # Phrase replacement — literal, case-insensitive
+            text = re.sub(re.escape(word), replacement, text, flags=re.IGNORECASE)
+        else:
+            # Single word — whole-word boundary match, preserves surrounding space
+            text = re.sub(rf"\b{re.escape(word)}\b", replacement, text, flags=re.IGNORECASE)
+    return text
 
 
 def split_into_chunks(text: str, max_chars: int) -> list[str]:
@@ -271,6 +299,7 @@ def record_job(job_id: str) -> None:
             job["current_chapter_index"] = ch_idx + 1
 
             clean_body = clean_markdown(chapter["body"])
+            clean_body = apply_pronunciations(clean_body)
             chunks = split_into_chunks(clean_body, max_chars)
             total_chunks = len(chunks)
             job["total_chunks"] = total_chunks

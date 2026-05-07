@@ -1,0 +1,22 @@
+{
+  "_readme": "Map words or phrases to phonetic spellings Kokoro handles better. Keys are case-insensitive. Single words use whole-word matching. Restart a recording job for changes to take effect.",
+
+  "Anya": "Ahn-ya",
+  "Bjorn": "Byorn",
+  "Elara": "Eh-lara",
+  "Valerius": "Vah-leer-ee-us",
+
+  "Khazalid": "Kah-zah-lid",
+  "Karaz-Thrum": "Kah-rahz Thrum",
+  "Silverford": "Silver-ford",
+  "Chorel": "Kor-el",
+  "Greygate": "Grey-gate",
+
+  "Sundering": "Sun-der-ing",
+  "Sunstone": "Sun-stone",
+  "Sundered Veil": "Sun-dered Vail",
+
+  "Weave": "Weev",
+
+  "AS": "Age of Sundering"
+}
