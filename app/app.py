@@ -82,6 +82,7 @@ APP_VERSION = os.environ.get("APP_VERSION", "dev")
 BOOKS_DIR = Path(os.environ.get("BOOKS_DIR", "/app/books"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/output"))
 PRONUNCIATIONS_FILE = Path(os.environ.get("PRONUNCIATIONS_FILE", "/app/books/pronunciations.json"))
+VOICES_FILE = Path(os.environ.get("VOICES_FILE", "/app/books/voices.json"))
 
 BOOKS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -309,6 +310,82 @@ def apply_pronunciations(text: str) -> str:
             # Single word — whole-word boundary match, preserves surrounding space
             text = re.sub(rf"\b{re.escape(word)}\b", replacement, text, flags=re.IGNORECASE)
     return text
+
+
+SPEAKER_TAG_RE = re.compile(r"^::([\w][\w\s]*)::[ \t]*", re.MULTILINE)
+
+
+def load_voices() -> dict:
+    """Load character voice profiles from voices.json. Returns empty dict if not found."""
+    if VOICES_FILE.exists():
+        try:
+            return json.loads(VOICES_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def parse_segments(text: str) -> list[tuple[str, str]]:
+    """Split text into (speaker_key, text) segments based on ::speaker:: paragraph tags.
+
+    A paragraph beginning with ::name:: is attributed to that character.
+    Untagged paragraphs revert to 'narrator'.
+    Consecutive same-speaker paragraphs are merged.
+    """
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    segments: list[tuple[str, str]] = []
+    current_speaker = "narrator"
+    current_parts: list[str] = []
+
+    for para in paragraphs:
+        m = SPEAKER_TAG_RE.match(para)
+        if m:
+            speaker = m.group(1).strip().lower()
+            para_text = para[m.end():].strip()
+            if speaker != current_speaker:
+                if current_parts:
+                    segments.append((current_speaker, "\n\n".join(current_parts)))
+                    current_parts = []
+                current_speaker = speaker
+            if para_text:
+                current_parts.append(para_text)
+        else:
+            if current_speaker != "narrator":
+                if current_parts:
+                    segments.append((current_speaker, "\n\n".join(current_parts)))
+                    current_parts = []
+                current_speaker = "narrator"
+            current_parts.append(para)
+
+    if current_parts:
+        segments.append((current_speaker, "\n\n".join(current_parts)))
+
+    return segments if segments else [("narrator", text.strip())]
+
+
+def apply_pitch(wav_bytes: bytes, pitch_ratio: float) -> bytes:
+    """Shift pitch of WAV audio using ffmpeg asetrate trick, preserving duration."""
+    if abs(pitch_ratio - 1.0) < 0.001:
+        return wav_bytes
+    sample_rate = 24000
+    new_rate = int(sample_rate * pitch_ratio)
+    tempo = max(0.5, min(2.0, 1.0 / pitch_ratio))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        in_path = tmp / "in.wav"
+        out_path = tmp / "out.wav"
+        in_path.write_bytes(wav_bytes)
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(in_path),
+                "-filter:a", f"asetrate={new_rate},aresample={sample_rate},atempo={tempo:.6f}",
+                str(out_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return out_path.read_bytes()
 
 
 def split_into_chunks(text: str, max_chars: int) -> list[str]:
@@ -608,18 +685,27 @@ def record_job(job_id: str) -> None:
             logger.info("[%s] Chapter %d/%d: %s",
                         job_id[:8], ch_num, len(chapters), chapter["title"])
 
+            voices_data = load_voices()
+            narrator_profile = voices_data.get("narrator", {"voice": voice, "speed": speed})
+
             clean_body = clean_markdown(chapter["body"])
             clean_body = apply_pronunciations(clean_body)
             title_line = apply_pronunciations(chapter["title"])
-            clean_body = f"{title_line}.\n\n{clean_body}"
-            chunks = split_into_chunks(clean_body, max_chars)
-            total_chunks = len(chunks)
+            full_text = f"{title_line}.\n\n{clean_body}"
+            segments = parse_segments(full_text)
+            all_chunks = [
+                (spk, chunk)
+                for spk, seg_text in segments
+                for chunk in split_into_chunks(seg_text, max_chars)
+            ]
+            total_chunks = len(all_chunks)
             job_set(job_id, total_chunks=total_chunks, current_chunk=0)
-            logger.info("[%s]   %d chunks to send", job_id[:8], total_chunks)
+            logger.info("[%s]   %d chunks across %d segments",
+                        job_id[:8], total_chunks, len(segments))
 
             audio_parts: list[bytes] = []
 
-            for chunk_idx, chunk in enumerate(chunks):
+            for chunk_idx, (seg_speaker, chunk) in enumerate(all_chunks):
                 if _stop_flags.get(job_id):
                     logger.info("[%s] Stop requested at chunk %d/%d — halting",
                                 job_id[:8], chunk_idx + 1, total_chunks)
@@ -627,10 +713,17 @@ def record_job(job_id: str) -> None:
                     return
 
                 job_set(job_id, current_chunk=chunk_idx + 1)
-                logger.debug("[%s]   Chunk %d/%d (%d chars)",
-                             job_id[:8], chunk_idx + 1, total_chunks, len(chunk))
+                profile = voices_data.get(seg_speaker, narrator_profile) if voices_data else narrator_profile
+                seg_voice = profile.get("voice", voice)
+                seg_speed = float(profile.get("speed", speed))
+                pitch_ratio = float(profile.get("pitch_ratio", 1.0))
+                logger.debug("[%s]   Chunk %d/%d (%d chars) speaker=%s voice=%s",
+                             job_id[:8], chunk_idx + 1, total_chunks, len(chunk),
+                             seg_speaker, seg_voice)
                 try:
-                    audio_data = call_kokoro(chunk, voice, speed)
+                    audio_data = call_kokoro(chunk, seg_voice, seg_speed)
+                    if abs(pitch_ratio - 1.0) >= 0.001:
+                        audio_data = apply_pitch(audio_data, pitch_ratio)
                 except Exception as kokoro_exc:
                     logger.error("[%s]   Kokoro failed on chunk %d/%d: %s",
                                  job_id[:8], chunk_idx + 1, total_chunks, kokoro_exc)
@@ -767,6 +860,24 @@ async def list_manuscripts():
         [f.name for f in BOOKS_DIR.iterdir() if f.is_file() and f.suffix in (".md", ".txt")]
     )
     return {"manuscripts": files}
+
+
+class VoicesUpdateRequest(BaseModel):
+    voices: dict
+
+
+@app.get("/api/voices")
+async def get_voices():
+    return load_voices()
+
+
+@app.post("/api/voices")
+async def save_voices_route(req: VoicesUpdateRequest):
+    # Normalize character keys to lowercase
+    normalized = {k.lower(): v for k, v in req.voices.items()}
+    VOICES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    VOICES_FILE.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+    return {"status": "saved", "count": len(normalized)}
 
 
 class VoicePreviewRequest(BaseModel):
@@ -908,22 +1019,36 @@ def record_single_chapter(job_id: str, build_id: str, manifest_path: Path) -> No
         max_chars = manifest.get("max_chars", DEFAULT_MAX_CHARS)
         stem = manifest["book"]
 
+        voices_data = load_voices()
+        narrator_profile = voices_data.get("narrator", {"voice": voice, "speed": speed})
+
         clean_body = clean_markdown(chapter["body"])
         clean_body = apply_pronunciations(clean_body)
         title_line = apply_pronunciations(chapter["title"])
-        clean_body = f"{title_line}.\n\n{clean_body}"
-        chunks = split_into_chunks(clean_body, max_chars)
-        total_chunks = len(chunks)
+        full_text = f"{title_line}.\n\n{clean_body}"
+        segments = parse_segments(full_text)
+        all_chunks = [
+            (spk, chunk)
+            for spk, seg_text in segments
+            for chunk in split_into_chunks(seg_text, max_chars)
+        ]
+        total_chunks = len(all_chunks)
         job_set(job_id, total_chunks=total_chunks)
-        logger.info("[%s]   %d chunks to send", job_id[:8], total_chunks)
+        logger.info("[%s]   %d chunks across %d segments", job_id[:8], total_chunks, len(segments))
 
         audio_parts: list[bytes] = []
-        for chunk_idx, chunk in enumerate(chunks):
+        for chunk_idx, (seg_speaker, chunk) in enumerate(all_chunks):
             if _stop_flags.get(job_id):
                 job_set(job_id, status="stopped")
                 return
             job_set(job_id, current_chunk=chunk_idx + 1)
-            audio_data = call_kokoro(chunk, voice, speed)
+            profile = voices_data.get(seg_speaker, narrator_profile) if voices_data else narrator_profile
+            seg_voice = profile.get("voice", voice)
+            seg_speed = float(profile.get("speed", speed))
+            pitch_ratio = float(profile.get("pitch_ratio", 1.0))
+            audio_data = call_kokoro(chunk, seg_voice, seg_speed)
+            if abs(pitch_ratio - 1.0) >= 0.001:
+                audio_data = apply_pitch(audio_data, pitch_ratio)
             audio_parts.append(audio_data)
 
         chapter_path = build_dir / ch_meta["output_mp3"]
@@ -1141,6 +1266,12 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
 </section>
 
 <section>
+  <h2>Character Voices</h2>
+  <p style="font-size:0.8rem;color:#666;margin-top:0;">Tag dialogue with <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">::character::</code> at the start of a paragraph. Untagged paragraphs use the narrator voice. Supports blends: <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">af_bella(0.6)+bm_george(0.4)</code></p>
+  <div id="voices-container">Loading&hellip;</div>
+</section>
+
+<section>
   <h2>Current Job</h2>
   <div id="status-box">No job running.</div>
 </section>
@@ -1153,9 +1284,11 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
 <script>
 let currentJobId = null;
 let pollTimer = null;
+let voicesData = {{}};
 
 // On load, check localStorage for an in-progress job and reconnect if still active
 window.addEventListener('DOMContentLoaded', async () => {{
+  await loadVoices();
   const saved = localStorage.getItem('chapterforge_job_id');
   if (saved) {{
     const resp = await fetch(`/api/jobs/${{saved}}`);
@@ -1330,6 +1463,136 @@ function renderStatus(job) {{
     job.error ? `<span style="color:#c0392b">Error: ${{job.error}}</span>` : '',
   ].filter(Boolean).join('<br>');
   box.innerHTML = lines;
+}}
+
+async function loadVoices() {{
+  const resp = await fetch('/api/voices');
+  if (resp.ok) voicesData = await resp.json();
+  else voicesData = {{}};
+  renderVoicesTable();
+}}
+
+function renderVoicesTable() {{
+  const container = document.getElementById('voices-container');
+  if (!container) return;
+  if (Object.keys(voicesData).length === 0) {{
+    container.innerHTML = '<p style="color:#666;font-size:0.85rem">No voices configured. Add a <strong>narrator</strong> entry to override the default voice per-book.</p>' +
+      '<div style="display:flex;gap:0.5rem;margin-top:0.6rem;align-items:center;">' +
+      '<input id="new-char-name" type="text" placeholder="character name" style="width:10rem;background:#222;border:1px solid #444;color:#eee;padding:0.3rem 0.5rem;border-radius:3px;font-size:0.85rem;">' +
+      '<button onclick="addCharVoice()" style="background:#333;color:#ccc;">+ Add</button>' +
+      '<button onclick="saveVoices()" style="margin-left:auto;">Save Voices</button>' +
+      '</div>';
+    return;
+  }}
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
+  html += '<thead><tr style="color:#666;border-bottom:1px solid #333">';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Character</th>';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Voice</th>';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Speed</th>';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Pitch</th>';
+  html += '<th></th></tr></thead><tbody>';
+  for (const [name, p] of Object.entries(voicesData)) {{
+    const nc = name === 'narrator' ? '#e8c96e' : '#ccc';
+    html += '<tr>';
+    html += '<td style="padding:0.3rem 0.4rem;color:' + nc + '">' + name + '</td>';
+    html += '<td style="padding:0.3rem 0.4rem"><input id="vv_' + name + '" type="text" value="' + (p.voice || '') + '" style="width:100%;background:#222;border:1px solid #444;color:#eee;padding:0.2rem 0.4rem;border-radius:3px;font-size:0.8rem;"></td>';
+    html += '<td style="padding:0.3rem 0.4rem"><input id="vs_' + name + '" type="number" value="' + (p.speed !== undefined ? p.speed : 0.85) + '" step="0.05" min="0.5" max="2.0" style="width:5.5rem;background:#222;border:1px solid #444;color:#eee;padding:0.2rem;border-radius:3px;font-size:0.8rem;"></td>';
+    html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;background:#222;border:1px solid #444;color:#eee;padding:0.2rem;border-radius:3px;font-size:0.8rem;"></td>';
+    html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
+    html += '<button onclick="testCharVoice(\'' + name + '\')" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;">Test</button>';
+    if (name !== 'narrator') {{
+      html += ' <button onclick="removeCharVoice(\'' + name + '\')" style="background:#333;color:#c0392b;padding:0.1rem 0.5rem;font-size:0.75rem;">&#10005;</button>';
+    }}
+    html += '</td></tr>';
+  }}
+  html += '</tbody></table>';
+  html += '<div style="display:flex;gap:0.5rem;margin-top:0.8rem;align-items:center;">';
+  html += '<input id="new-char-name" type="text" placeholder="character name" style="width:10rem;background:#222;border:1px solid #444;color:#eee;padding:0.3rem 0.5rem;border-radius:3px;font-size:0.85rem;">';
+  html += '<button onclick="addCharVoice()" style="background:#333;color:#ccc;">+ Add</button>';
+  html += '<button onclick="saveVoices()" style="margin-left:auto;">Save Voices</button>';
+  html += '</div>';
+  html += '<audio id="char-preview-player" style="display:none;margin-top:0.5rem;width:100%;" controls></audio>';
+  container.innerHTML = html;
+}}
+
+function collectVoicesData() {{
+  const data = {{}};
+  for (const name of Object.keys(voicesData)) {{
+    const vEl = document.getElementById('vv_' + name);
+    const sEl = document.getElementById('vs_' + name);
+    const pEl = document.getElementById('vp_' + name);
+    if (vEl) {{
+      data[name] = {{
+        voice: vEl.value.trim(),
+        speed: parseFloat(sEl.value),
+        pitch_ratio: parseFloat(pEl.value),
+      }};
+    }}
+  }}
+  return data;
+}}
+
+function addCharVoice() {{
+  const nameInput = document.getElementById('new-char-name');
+  const name = nameInput.value.trim().toLowerCase().replace(/\s+/g, '_');
+  if (!name) return;
+  const current = collectVoicesData();
+  if (!current.hasOwnProperty(name)) {{
+    current[name] = {{ voice: '{DEFAULT_VOICE}', speed: {DEFAULT_SPEED}, pitch_ratio: 1.0 }};
+  }}
+  voicesData = current;
+  renderVoicesTable();
+  nameInput.value = '';
+}}
+
+function removeCharVoice(name) {{
+  const current = collectVoicesData();
+  delete current[name];
+  voicesData = current;
+  renderVoicesTable();
+}}
+
+async function saveVoices() {{
+  const data = collectVoicesData();
+  const resp = await fetch('/api/voices', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ voices: data }})
+  }});
+  if (resp.ok) {{
+    voicesData = data;
+    alert('Voices saved.');
+  }} else {{
+    alert('Failed to save voices.');
+  }}
+}}
+
+async function testCharVoice(name) {{
+  const current = collectVoicesData();
+  const profile = current[name];
+  if (!profile) return;
+  const text = document.getElementById('preview-text').value.trim() ||
+    'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
+  const el = document.querySelector('[onclick="testCharVoice(\'' + name + '\')"');
+  if (el) {{ el.disabled = true; el.textContent = '\u2026'; }}
+  try {{
+    const resp = await fetch('/api/preview/voice', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ text, voice: profile.voice, speed: profile.speed }})
+    }});
+    if (resp.ok) {{
+      const blob = await resp.blob();
+      const player = document.getElementById('char-preview-player');
+      if (player) {{
+        player.src = URL.createObjectURL(blob);
+        player.style.display = 'block';
+        player.play();
+      }}
+    }}
+  }} finally {{
+    if (el) {{ el.disabled = false; el.textContent = 'Test'; }}
+  }}
 }}
 </script>
 <footer style="text-align:center;color:#555;font-size:0.75rem;margin-top:2rem;padding-bottom:1rem;">
