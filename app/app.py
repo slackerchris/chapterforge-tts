@@ -1633,56 +1633,51 @@ function renderVoicesTable() {{
   container.innerHTML = html;
 }}
 
-function collectVoicesData() {{
-  const data = {{}};
+// Sync DOM values (speed/pitch/blend) back into voicesData for all existing rows.
+// voicesData is always the source of truth; DOM is just the edit surface.
+function syncDomToVoicesData() {{
   for (const name of Object.keys(voicesData)) {{
     const slots = readBlendSlots(name);
     const sEl = document.getElementById('vs_' + name);
     const pEl = document.getElementById('vp_' + name);
-    if (slots.length && sEl) {{
-      data[name] = {{
-        voice: buildBlend(slots),
-        speed: parseFloat(sEl.value),
-        pitch_ratio: parseFloat(pEl.value),
-      }};
-    }}
+    if (slots.length) voicesData[name].voice = buildBlend(slots);
+    if (sEl) voicesData[name].speed = parseFloat(sEl.value);
+    if (pEl) voicesData[name].pitch_ratio = parseFloat(pEl.value);
   }}
-  return data;
 }}
 
 function addCharVoice() {{
   const nameInput = document.getElementById('new-char-name');
   const name = nameInput.value.trim().toLowerCase().replace(/\\s+/g, '_');
   if (!name) return;
-  const current = collectVoicesData();
-  if (!current.hasOwnProperty(name)) {{
+  // Persist any edits made to existing rows before re-rendering
+  syncDomToVoicesData();
+  if (!voicesData.hasOwnProperty(name)) {{
     const slots = readBlendSlots('new');
-    current[name] = {{
+    voicesData[name] = {{
       voice: buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}', weight: 1.0}}]),
       speed: parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED},
       pitch_ratio: parseFloat(document.getElementById('new-char-pitch').value) || 1.0,
     }};
   }}
-  voicesData = current;
   renderVoicesTable();
 }}
 
 function removeCharVoice(name) {{
-  const current = collectVoicesData();
-  delete current[name];
-  voicesData = current;
+  syncDomToVoicesData();
+  delete voicesData[name];
   renderVoicesTable();
 }}
 
 async function saveVoices() {{
-  const data = collectVoicesData();
+  // Sync any in-progress DOM edits into voicesData, then POST the whole object
+  syncDomToVoicesData();
   const resp = await fetch('/api/voices', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify({{ voices: data }})
+    body: JSON.stringify({{ voices: voicesData }})
   }});
   if (resp.ok) {{
-    voicesData = data;
     alert('Voices saved.');
   }} else {{
     alert('Failed to save voices.');

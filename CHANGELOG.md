@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.5] - 2026-05-07
+### Fixed
+- **Voice save always stores `{}`** — `collectVoicesData()` re-read character data from DOM elements that may not exist, causing it to silently drop all rows and POST an empty object. Replaced with `syncDomToVoicesData()` which updates the in-memory `voicesData` object (the single source of truth) from the DOM, then `saveVoices` POSTs `voicesData` directly. `addCharVoice` and `removeCharVoice` also updated to manipulate `voicesData` in-place instead of going through DOM round-trips.
+
+---
+
 ## [0.6.4] - 2026-05-07
 ### Fixed
 - **Character Voices always "Loading…"** — `\'` inside the Python f-string template rendered as bare `'` in the emitted JavaScript, producing a JS syntax error that silently prevented the entire `<script>` block from executing. Fixed by using `\\'` to emit a literal `\'` in the rendered JS (three occurrences: `removeBlendSlot` button in `blendBuilderHtml` forEach, `addBlendSlot` button in same, and `removeBlendSlot` button in `addBlendSlot`).
