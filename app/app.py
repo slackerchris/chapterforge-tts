@@ -521,6 +521,16 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
     Retries up to KOKORO_RETRIES times on transient errors (timeouts, 5xx).
     Raises on the final failure.
     """
+    # Blend strings (e.g. "af_bella+af_sky") require Kokoro-FastAPI v0.2+.
+    # Fall back to the first voice if the server returns 500 on a blend.
+    voices = [v.strip() for v in voice.split("+") if v.strip()]
+    effective_voice = voices[0] if voices else voice
+    if len(voices) > 1:
+        logger.warning(
+            "Voice blend %r — will try blend first, fall back to %r if server rejects it",
+            voice, effective_voice,
+        )
+
     payload = {
         "model": "kokoro",
         "voice": voice,
@@ -538,6 +548,20 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
             return resp.content
         except Exception as exc:
             last_exc = exc
+            # On first 500 with a blend voice, fall back to the primary voice immediately
+            if (
+                attempt == 1
+                and len(voices) > 1
+                and hasattr(exc, "response")
+                and exc.response is not None
+                and exc.response.status_code == 500
+            ):
+                logger.warning(
+                    "Kokoro rejected blend %r with 500 — falling back to primary voice %r",
+                    voice, effective_voice,
+                )
+                payload["voice"] = effective_voice
+                continue
             if attempt < KOKORO_RETRIES:
                 logger.warning(
                     "Kokoro attempt %d/%d failed (%s) — retrying in %.0fs",
