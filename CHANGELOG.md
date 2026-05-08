@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.9] - 2026-05-07
+### Changed
+- Kokoro payload log line promoted from DEBUG to INFO so voice string is visible in normal logs.
+
+---
+
 ## [0.6.8] - 2026-05-07
 ### Fixed
 - **Test button on existing character rows silent/broken** — `testCharVoice()` was still calling the deleted `collectVoicesData()` function. Updated to use `syncDomToVoicesData()` + `voicesData` directly.

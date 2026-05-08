@@ -527,7 +527,7 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
         "speed": speed,
         "input": text,
     }
-    logger.debug("Kokoro payload: voice=%r speed=%s text_len=%d", voice, speed, len(text))
+    logger.info("Kokoro payload: voice=%r speed=%s text_len=%d", voice, speed, len(text))
     last_exc: Exception | None = None
     for attempt in range(1, KOKORO_RETRIES + 1):
         try:
