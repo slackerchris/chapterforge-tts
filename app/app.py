@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import logging
 import zipfile
+import shutil
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
@@ -1098,6 +1099,18 @@ async def download_m4b(build_id: str):
                         headers={"Content-Disposition": f'attachment; filename="{m4b_name}"'})
 
 
+@app.delete("/build/{build_id}")
+async def delete_build(build_id: str):
+    """Permanently delete a build directory and all its files."""
+    if ".." in build_id or "/" in build_id:
+        raise HTTPException(status_code=400, detail="Invalid build ID.")
+    build_dir = OUTPUT_DIR / "chapters" / build_id
+    if not build_dir.exists():
+        raise HTTPException(status_code=404, detail="Build not found.")
+    shutil.rmtree(build_dir)
+    return {"status": "deleted", "build_id": build_id}
+
+
 @app.get("/audio/{build_id}/{filename}")
 async def get_audio(build_id: str, filename: str):
     # Prevent path traversal
@@ -1146,7 +1159,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     for b in builds:
         chapters_html = "".join(
             f'<li>'
-            f'<audio controls preload="none" src="/audio/{b["build_id"]}/{ch["output_mp3"]}"></audio>'
+            f'<audio controls preload="metadata" src="/audio/{b["build_id"]}/{ch["output_mp3"]}"></audio>'
             f' {ch["title"]}'
             f' <a href="/audio/{b["build_id"]}/{ch["output_mp3"]}" download="{ch["output_mp3"]}" title="Download chapter" style="color:#e8c96e;font-size:0.8rem;margin-left:0.4rem;">&#8681;</a>'
             f' <button onclick="rechapter(\'{b["build_id"]}\',{ch["chapter_index"]},this)" title="Re-record this chapter" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;margin-left:0.3rem;">&#8635;</button>'
@@ -1158,6 +1171,12 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
             f'style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; M4B</a>'
             if b.get("m4b") else ""
         )
+        delete_btn = (
+            f' &nbsp;<button onclick="deleteBuild(\'{b["build_id"]}\',this)"'
+            f' title="Delete this build" style="background:none;border:none;color:#555;'
+            f'font-size:0.85rem;cursor:pointer;padding:0 0.2rem;" '
+            f'onmouseover="this.style.color=\'#c0392b\'" onmouseout="this.style.color=\'#555\'">&#128465;</button>'
+        )
         build_rows += f"""
         <details>
           <summary><strong>{b.get("book", b["build_id"])}</strong>
@@ -1165,6 +1184,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
             &nbsp;|&nbsp; {b.get("draft_date", "")}
             &nbsp;<a href="/build/{b["build_id"]}/download/zip" title="Download all chapters as ZIP" style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; ZIP</a>
             {m4b_link}
+            {delete_btn}
           </summary>
           <ul class="chapter-list">{chapters_html}</ul>
         </details>
@@ -1423,6 +1443,24 @@ async function rechapter(buildId, chapterIndex, btn) {{
   }} catch (e) {{
     btn.disabled = false;
     btn.textContent = '&#8635;';
+  }}
+}}
+
+async function deleteBuild(buildId, btn) {{
+  if (!confirm('Permanently delete this build and all its audio files? This cannot be undone.')) return;
+  btn.disabled = true;
+  try {{
+    const resp = await fetch(`/build/${{buildId}}`, {{ method: 'DELETE' }});
+    if (resp.ok) {{
+      const details = btn.closest('details');
+      if (details) details.remove();
+    }} else {{
+      alert('Failed to delete build.');
+      btn.disabled = false;
+    }}
+  }} catch (e) {{
+    alert('Error: ' + e.message);
+    btn.disabled = false;
   }}
 }}
 

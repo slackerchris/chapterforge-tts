@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.7] - 2026-05-07
+### Added
+- **Delete build button** — trash icon on each build row in Audio Builds. Prompts for confirmation then calls `DELETE /build/{id}` which removes the directory and all files. The row is removed from the page immediately without a reload.
+
+### Fixed
+- Chapter audio players showed `0:00 / 0:00` because `preload="none"` prevented the browser from reading duration metadata. Changed to `preload="metadata"` so durations show correctly without downloading full audio.
+- `rechapter` JS function was accidentally truncated in a previous edit; restored.
+
+---
+
 ## [0.6.6] - 2026-05-07
 ### Fixed
 - **Pronunciations silently ignored when file contains `#` comments** — `json.loads()` threw a parse error which was swallowed, returning an empty substitution map. `load_pronunciations()` now strips `#`-prefixed comment lines before parsing, and logs a warning instead of silently failing.
