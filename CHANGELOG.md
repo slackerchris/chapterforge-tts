@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.10] - 2026-05-08
+### Fixed
+- Voice blends now send plain `voice1+voice2` format to Kokoro instead of `voice1(w)+voice2(w)`. Kokoro does not support the weighted syntax and returned HTTP 500 on every blend request. Weight inputs removed from the blend builder UI.
+
+---
+
 ## [0.6.9] - 2026-05-07
 ### Changed
 - Kokoro payload log line promoted from DEBUG to INFO so voice string is visible in normal logs.

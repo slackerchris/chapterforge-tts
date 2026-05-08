@@ -1550,12 +1550,12 @@ function parseBlend(str) {{
   }});
 }}
 
-// [{{voice, weight}}, ...] → "af_bella(0.6)+bm_george(0.4)" or "af_bella" if single slot
+// [{{voice}}, ...] → "af_bella+bm_george" or "af_bella" if single slot
 function buildBlend(slots) {{
   const filtered = slots.filter(s => s.voice);
   if (!filtered.length) return '{DEFAULT_VOICE}';
   if (filtered.length === 1) return filtered[0].voice;
-  return filtered.map(s => s.voice + '(' + s.weight + ')').join('+');
+  return filtered.map(s => s.voice).join('+');
 }}
 
 function voiceSelectHtml(id, selectedVal) {{
@@ -1573,13 +1573,11 @@ function voiceSelectHtml(id, selectedVal) {{
 }}
 
 function blendBuilderHtml(prefix, blendStr) {{
-  const iStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;';
   const slots = parseBlend(blendStr);
   let html = '<div id="blend_' + prefix + '" style="display:flex;flex-direction:column;gap:0.25rem;">';
   slots.forEach((slot, i) => {{
     html += '<div style="display:flex;gap:0.3rem;align-items:center;">';
     html += voiceSelectHtml('bv_' + prefix + '_' + i, slot.voice);
-    html += '<input id="bw_' + prefix + '_' + i + '" type="number" value="' + slot.weight + '" step="0.05" min="0.05" max="1.0" title="weight" style="width:4rem;' + iStyle + '">';
     if (i > 0) {{
       html += '<button onclick="removeBlendSlot(\\'' + prefix + '\\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
     }} else {{
@@ -1603,8 +1601,7 @@ function readBlendSlots(prefix) {{
   while (true) {{
     const vEl = document.getElementById('bv_' + prefix + '_' + i);
     if (!vEl) break;
-    const wEl = document.getElementById('bw_' + prefix + '_' + i);
-    slots.push({{voice: vEl.value, weight: parseFloat(wEl.value)}});
+    slots.push({{voice: vEl.value}});
     i++;
   }}
   return slots;
@@ -1614,11 +1611,9 @@ function addBlendSlot(prefix) {{
   const container = document.getElementById('blend_' + prefix);
   if (!container) return;
   const i = countBlendSlots(prefix);
-  const iStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;';
   const row = document.createElement('div');
   row.style.cssText = 'display:flex;gap:0.3rem;align-items:center;';
   row.innerHTML = voiceSelectHtml('bv_' + prefix + '_' + i, '{DEFAULT_VOICE}') +
-    '<input id="bw_' + prefix + '_' + i + '" type="number" value="0.5" step="0.05" min="0.05" max="1.0" title="weight" style="width:4rem;' + iStyle + '">' +
     '<button onclick="removeBlendSlot(\\'' + prefix + '\\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
   container.appendChild(row);
 }}
@@ -1705,7 +1700,7 @@ function addCharVoice() {{
   if (!voicesData.hasOwnProperty(name)) {{
     const slots = readBlendSlots('new');
     voicesData[name] = {{
-      voice: buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}', weight: 1.0}}]),
+      voice: buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}'}}]),
       speed: parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED},
       pitch_ratio: parseFloat(document.getElementById('new-char-pitch').value) || 1.0,
     }};
@@ -1736,7 +1731,7 @@ async function saveVoices() {{
 
 async function testNewCharVoice() {{
   const slots = readBlendSlots('new');
-  const voice = buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}', weight: 1.0}}]);
+  const voice = buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}'}}]);
   const speed = parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED};
   const text = document.getElementById('preview-text').value.trim() ||
     'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
