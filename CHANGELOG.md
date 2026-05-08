@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.8] - 2026-05-07
+### Fixed
+- **Test button on existing character rows silent/broken** — `testCharVoice()` was still calling the deleted `collectVoicesData()` function. Updated to use `syncDomToVoicesData()` + `voicesData` directly.
+
+### Changed
+- `call_kokoro` now logs the exact voice string and speed at DEBUG level, and logs Kokoro's full response body when it returns a non-2xx status — makes blend-related 500s diagnosable from the log.
+
+---
+
 ## [0.6.7] - 2026-05-07
 ### Added
 - **Delete build button** — trash icon on each build row in Audio Builds. Prompts for confirmation then calls `DELETE /build/{id}` which removes the directory and all files. The row is removed from the page immediately without a reload.

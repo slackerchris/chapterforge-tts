@@ -527,10 +527,13 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
         "speed": speed,
         "input": text,
     }
+    logger.debug("Kokoro payload: voice=%r speed=%s text_len=%d", voice, speed, len(text))
     last_exc: Exception | None = None
     for attempt in range(1, KOKORO_RETRIES + 1):
         try:
             resp = requests.post(KOKORO_ENDPOINT, json=payload, timeout=KOKORO_TIMEOUT)
+            if not resp.ok:
+                logger.warning("Kokoro HTTP %d response body: %s", resp.status_code, resp.text[:500])
             resp.raise_for_status()
             return resp.content
         except Exception as exc:
@@ -1547,10 +1550,11 @@ function parseBlend(str) {{
   }});
 }}
 
-// [{{voice, weight}}, ...] → "af_bella(0.6)+bm_george(0.4)" or "af_bella" if single full-weight
+// [{{voice, weight}}, ...] → "af_bella(0.6)+bm_george(0.4)" or "af_bella" if single slot
 function buildBlend(slots) {{
   const filtered = slots.filter(s => s.voice);
-  if (filtered.length === 1 && filtered[0].weight === 1.0) return filtered[0].voice;
+  if (!filtered.length) return '{DEFAULT_VOICE}';
+  if (filtered.length === 1) return filtered[0].voice;
   return filtered.map(s => s.voice + '(' + s.weight + ')').join('+');
 }}
 
@@ -1759,8 +1763,8 @@ async function testNewCharVoice() {{
 }}
 
 async function testCharVoice(name) {{
-  const current = collectVoicesData();
-  const profile = current[name];
+  syncDomToVoicesData();
+  const profile = voicesData[name];
   if (!profile) return;
   const text = document.getElementById('preview-text').value.trim() ||
     'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
