@@ -286,12 +286,20 @@ def split_into_chapters(text: str) -> list[dict]:
 
 
 def load_pronunciations() -> dict[str, str]:
-    """Load word substitutions from pronunciations.json if it exists."""
+    """Load word substitutions from pronunciations.json if it exists.
+    Lines beginning with # (optionally preceded by whitespace) are stripped
+    so users can comment out entries without breaking JSON parsing.
+    """
     if PRONUNCIATIONS_FILE.exists():
         try:
-            return json.loads(PRONUNCIATIONS_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
+            raw = PRONUNCIATIONS_FILE.read_text(encoding="utf-8")
+            stripped = "\n".join(
+                line for line in raw.splitlines()
+                if not line.lstrip().startswith("#")
+            )
+            return json.loads(stripped)
+        except Exception as exc:
+            logger.warning("Could not load pronunciations file: %s", exc)
     return {}
 
 

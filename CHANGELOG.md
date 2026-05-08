@@ -5,6 +5,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.6] - 2026-05-07
+### Fixed
+- **Pronunciations silently ignored when file contains `#` comments** — `json.loads()` threw a parse error which was swallowed, returning an empty substitution map. `load_pronunciations()` now strips `#`-prefixed comment lines before parsing, and logs a warning instead of silently failing.
+
+---
+
 ## [0.6.5] - 2026-05-07
 ### Fixed
 - **Voice save always stores `{}`** — `collectVoicesData()` re-read character data from DOM elements that may not exist, causing it to silently drop all rows and POST an empty object. Replaced with `syncDomToVoicesData()` which updates the in-memory `voicesData` object (the single source of truth) from the DOM, then `saveVoices` POSTs `voicesData` directly. `addCharVoice` and `removeCharVoice` also updated to manipulate `voicesData` in-place instead of going through DOM round-trips.
