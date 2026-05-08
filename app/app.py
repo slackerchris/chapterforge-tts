@@ -521,15 +521,11 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
     Retries up to KOKORO_RETRIES times on transient errors (timeouts, 5xx).
     Raises on the final failure.
     """
-    # Blend strings (e.g. "af_bella+af_sky") require Kokoro-FastAPI v0.2+.
-    # Fall back to the first voice if the server returns 500 on a blend.
-    voices = [v.strip() for v in voice.split("+") if v.strip()]
-    effective_voice = voices[0] if voices else voice
-    if len(voices) > 1:
-        logger.warning(
-            "Voice blend %r — will try blend first, fall back to %r if server rejects it",
-            voice, effective_voice,
-        )
+    # Strip any legacy blend strings (e.g. "af_bella+af_sky") down to first voice.
+    if "+" in voice:
+        primary = voice.split("+")[0].strip()
+        logger.warning("Blend voice %r stripped to primary %r (server does not support blends)", voice, primary)
+        voice = primary
 
     payload = {
         "model": "kokoro",
@@ -548,20 +544,6 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
             return resp.content
         except Exception as exc:
             last_exc = exc
-            # On first 500 with a blend voice, fall back to the primary voice immediately
-            if (
-                attempt == 1
-                and len(voices) > 1
-                and hasattr(exc, "response")
-                and exc.response is not None
-                and exc.response.status_code == 500
-            ):
-                logger.warning(
-                    "Kokoro rejected blend %r with 500 — falling back to primary voice %r",
-                    voice, effective_voice,
-                )
-                payload["voice"] = effective_voice
-                continue
             if attempt < KOKORO_RETRIES:
                 logger.warning(
                     "Kokoro attempt %d/%d failed (%s) — retrying in %.0fs",
@@ -1596,66 +1578,7 @@ function voiceSelectHtml(id, selectedVal) {{
   return s;
 }}
 
-function blendBuilderHtml(prefix, blendStr) {{
-  const slots = parseBlend(blendStr);
-  let html = '<div id="blend_' + prefix + '" style="display:flex;flex-direction:column;gap:0.25rem;">';
-  slots.forEach((slot, i) => {{
-    html += '<div style="display:flex;gap:0.3rem;align-items:center;">';
-    html += voiceSelectHtml('bv_' + prefix + '_' + i, slot.voice);
-    if (i > 0) {{
-      html += '<button onclick="removeBlendSlot(\\'' + prefix + '\\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
-    }} else {{
-      html += '<button onclick="addBlendSlot(\\'' + prefix + '\\')" style="background:#333;color:#ccc;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;" title="Add voice to blend">+</button>';
-    }}
-    html += '</div>';
-  }});
-  html += '</div>';
-  return html;
-}}
 
-function countBlendSlots(prefix) {{
-  let i = 0;
-  while (document.getElementById('bv_' + prefix + '_' + i)) i++;
-  return i;
-}}
-
-function readBlendSlots(prefix) {{
-  const slots = [];
-  let i = 0;
-  while (true) {{
-    const vEl = document.getElementById('bv_' + prefix + '_' + i);
-    if (!vEl) break;
-    slots.push({{voice: vEl.value}});
-    i++;
-  }}
-  return slots;
-}}
-
-function addBlendSlot(prefix) {{
-  const container = document.getElementById('blend_' + prefix);
-  if (!container) return;
-  const i = countBlendSlots(prefix);
-  const row = document.createElement('div');
-  row.style.cssText = 'display:flex;gap:0.3rem;align-items:center;';
-  row.innerHTML = voiceSelectHtml('bv_' + prefix + '_' + i, '{DEFAULT_VOICE}') +
-    '<button onclick="removeBlendSlot(\\'' + prefix + '\\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
-  container.appendChild(row);
-}}
-
-function removeBlendSlot(prefix, idx) {{
-  // Re-render: collect remaining slots, rebuild blend string, re-render table
-  const slots = readBlendSlots(prefix).filter((_, i) => i !== idx);
-  const blendStr = buildBlend(slots);
-  // Find which character this prefix belongs to
-  if (prefix === 'new') {{
-    // Rebuild the new-row blend cell only
-    const cell = document.getElementById('blend_new').parentElement;
-    cell.innerHTML = blendBuilderHtml('new', blendStr);
-  }} else {{
-    voicesData[prefix].voice = blendStr;
-    renderVoicesTable();
-  }}
-}}
 
 function renderVoicesTable() {{
   const container = document.getElementById('voices-container');
@@ -1664,7 +1587,7 @@ function renderVoicesTable() {{
   let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
   html += '<thead><tr style="color:#666;border-bottom:1px solid #333">';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Character</th>';
-  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Voice / Blend</th>';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Voice</th>';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Speed</th>';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Pitch</th>';
   html += '<th></th></tr></thead><tbody>';
@@ -1675,7 +1598,7 @@ function renderVoicesTable() {{
     const nc = name === 'narrator' ? '#e8c96e' : '#ccc';
     html += '<tr>';
     html += '<td style="padding:0.3rem 0.4rem;color:' + nc + ';white-space:nowrap">' + name + '</td>';
-    html += '<td style="padding:0.3rem 0.4rem">' + blendBuilderHtml(name, p.voice || '{DEFAULT_VOICE}') + '</td>';
+    html += '<td style="padding:0.3rem 0.4rem">' + voiceSelectHtml('vv_' + name, primaryVoice(p.voice || '{DEFAULT_VOICE}')) + '</td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vs_' + name + '" type="number" value="' + (p.speed !== undefined ? p.speed : 0.85) + '" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
@@ -1687,7 +1610,7 @@ function renderVoicesTable() {{
   }}
   html += '</tbody><tfoot><tr style="border-top:1px solid #333">';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-name" type="text" placeholder="name" style="width:100%;' + iStyle + '"></td>';
-  html += '<td style="padding:0.4rem 0.4rem">' + blendBuilderHtml('new', '{DEFAULT_VOICE}') + '</td>';
+  html += '<td style="padding:0.4rem 0.4rem">' + voiceSelectHtml('vv_new', '{DEFAULT_VOICE}') + '</td>';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-speed" type="number" value="{DEFAULT_SPEED}" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-pitch" type="number" value="1.0" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem;white-space:nowrap">';
@@ -1702,14 +1625,14 @@ function renderVoicesTable() {{
   container.innerHTML = html;
 }}
 
-// Sync DOM values (speed/pitch/blend) back into voicesData for all existing rows.
+// Sync DOM values (voice/speed/pitch) back into voicesData for all existing rows.
 // voicesData is always the source of truth; DOM is just the edit surface.
 function syncDomToVoicesData() {{
   for (const name of Object.keys(voicesData)) {{
-    const slots = readBlendSlots(name);
+    const vEl = document.getElementById('vv_' + name);
     const sEl = document.getElementById('vs_' + name);
     const pEl = document.getElementById('vp_' + name);
-    if (slots.length) voicesData[name].voice = buildBlend(slots);
+    if (vEl) voicesData[name].voice = vEl.value;
     if (sEl) voicesData[name].speed = parseFloat(sEl.value);
     if (pEl) voicesData[name].pitch_ratio = parseFloat(pEl.value);
   }}
@@ -1722,9 +1645,9 @@ function addCharVoice() {{
   // Persist any edits made to existing rows before re-rendering
   syncDomToVoicesData();
   if (!voicesData.hasOwnProperty(name)) {{
-    const slots = readBlendSlots('new');
+    const vEl = document.getElementById('vv_new');
     voicesData[name] = {{
-      voice: buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}'}}]),
+      voice: vEl ? vEl.value : '{DEFAULT_VOICE}',
       speed: parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED},
       pitch_ratio: parseFloat(document.getElementById('new-char-pitch').value) || 1.0,
     }};
@@ -1754,8 +1677,8 @@ async function saveVoices() {{
 }}
 
 async function testNewCharVoice() {{
-  const slots = readBlendSlots('new');
-  const voice = buildBlend(slots.length ? slots : [{{voice: '{DEFAULT_VOICE}'}}]);
+  const vEl = document.getElementById('vv_new');
+  const voice = vEl ? vEl.value : '{DEFAULT_VOICE}';
   const speed = parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED};
   const text = document.getElementById('preview-text').value.trim() ||
     'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
