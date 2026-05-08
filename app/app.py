@@ -1138,7 +1138,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     for b in builds:
         chapters_html = "".join(
             f'<li>'
-            f'<audio controls src="/audio/{b["build_id"]}/{ch["output_mp3"]}"></audio>'
+            f'<audio controls preload="none" src="/audio/{b["build_id"]}/{ch["output_mp3"]}"></audio>'
             f' {ch["title"]}'
             f' <a href="/audio/{b["build_id"]}/{ch["output_mp3"]}" download="{ch["output_mp3"]}" title="Download chapter" style="color:#e8c96e;font-size:0.8rem;margin-left:0.4rem;">&#8681;</a>'
             f' <button onclick="rechapter(\'{b["build_id"]}\',{ch["chapter_index"]},this)" title="Re-record this chapter" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;margin-left:0.3rem;">&#8635;</button>'
@@ -1531,9 +1531,9 @@ function blendBuilderHtml(prefix, blendStr) {{
     html += voiceSelectHtml('bv_' + prefix + '_' + i, slot.voice);
     html += '<input id="bw_' + prefix + '_' + i + '" type="number" value="' + slot.weight + '" step="0.05" min="0.05" max="1.0" title="weight" style="width:4rem;' + iStyle + '">';
     if (i > 0) {{
-      html += '<button onclick="removeBlendSlot(\'' + prefix + '\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
+      html += '<button onclick="removeBlendSlot(\\'' + prefix + '\\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
     }} else {{
-      html += '<button onclick="addBlendSlot(\'' + prefix + '\')" style="background:#333;color:#ccc;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;" title="Add voice to blend">+</button>';
+      html += '<button onclick="addBlendSlot(\\'' + prefix + '\\')" style="background:#333;color:#ccc;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;" title="Add voice to blend">+</button>';
     }}
     html += '</div>';
   }});
@@ -1569,7 +1569,7 @@ function addBlendSlot(prefix) {{
   row.style.cssText = 'display:flex;gap:0.3rem;align-items:center;';
   row.innerHTML = voiceSelectHtml('bv_' + prefix + '_' + i, '{DEFAULT_VOICE}') +
     '<input id="bw_' + prefix + '_' + i + '" type="number" value="0.5" step="0.05" min="0.05" max="1.0" title="weight" style="width:4rem;' + iStyle + '">' +
-    '<button onclick="removeBlendSlot(\'' + prefix + '\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
+    '<button onclick="removeBlendSlot(\\'' + prefix + '\\',' + i + ')" style="background:#333;color:#c0392b;padding:0.1rem 0.4rem;font-size:0.75rem;flex-shrink:0;">&#10005;</button>';
   container.appendChild(row);
 }}
 

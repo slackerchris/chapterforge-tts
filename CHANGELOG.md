@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.4] - 2026-05-07
+### Fixed
+- **Character Voices always "Loading…"** — `\'` inside the Python f-string template rendered as bare `'` in the emitted JavaScript, producing a JS syntax error that silently prevented the entire `<script>` block from executing. Fixed by using `\\'` to emit a literal `\'` in the rendered JS (three occurrences: `removeBlendSlot` button in `blendBuilderHtml` forEach, `addBlendSlot` button in same, and `removeBlendSlot` button in `addBlendSlot`).
+- **Server hammered by repeated audio requests** — chapter `<audio>` elements in the build list lacked `preload="none"`, so the browser eagerly buffered every visible audio file on each page load. Added `preload="none"` so audio data is only fetched when the user clicks play.
+
+---
+
 ## [0.6.3] - 2026-05-07
 ### Fixed
 - `loadVoices()` silently swallowed errors thrown inside `renderVoicesTable()`, leaving the section stuck on "Loading…". Added a dedicated try/catch so errors are displayed inline and logged to the console.
