@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.13] - 2026-05-08
+### Fixed
+- Voice normalisation now strips both the `+secondary` blend suffix AND legacy `(weight)` suffixes (e.g. `am_michael(1)` → `am_michael`). Previously only the `+` split was applied, leaving the weight in the voice name and causing a 500.
+### Changed
+- Suppressed `/api/jobs/` poll requests from uvicorn access log to reduce log noise.
+
+---
+
 ## [0.6.12] - 2026-05-08
 ### Changed
 - Removed voice blend UI entirely. Character voices now use a single dropdown. Legacy blend strings stored in voices.json are silently stripped to the first voice at call time.

@@ -63,6 +63,15 @@ _error_handler.setLevel(logging.WARNING)
 logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler, _error_handler])
 logger = logging.getLogger("chapterforge")
 
+# Suppress noisy poll requests from uvicorn's access log
+class _SuppressJobPolls(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "/api/jobs/" not in msg
+
+for _uvicorn_logger_name in ("uvicorn.access", "uvicorn"):
+    logging.getLogger(_uvicorn_logger_name).addFilter(_SuppressJobPolls())
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -521,10 +530,12 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
     Retries up to KOKORO_RETRIES times on transient errors (timeouts, 5xx).
     Raises on the final failure.
     """
-    # Strip any legacy blend strings (e.g. "af_bella+af_sky") down to first voice.
-    if "+" in voice:
-        primary = voice.split("+")[0].strip()
-        logger.warning("Blend voice %r stripped to primary %r (server does not support blends)", voice, primary)
+    # Strip any legacy blend strings (e.g. "af_bella+af_sky" or "am_michael(1)+bm_george(0.5)")
+    # down to just the first plain voice name.
+    if "+" in voice or re.search(r"\(\d", voice):
+        # Split on + and take first part, then strip any trailing (weight)
+        primary = re.sub(r"\([^)]*\)", "", voice.split("+")[0]).strip()
+        logger.warning("Legacy voice string %r normalised to %r", voice, primary)
         voice = primary
 
     payload = {
