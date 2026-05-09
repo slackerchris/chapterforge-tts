@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.18] - 2026-05-09
+### Added
+- Voice presets can now store `pitch_ratio` alongside their blended voice.
+- Record jobs now support a top-level pitch ratio, and selecting a voice preset copies its pitch into the active pitch field.
+
+### Changed
+- `voice_presets.json` now stores presets as profile objects while still accepting legacy string-only preset values.
+
+---
+
 ## [0.6.17] - 2026-05-09
 ### Added
 - Pronunciations status and preview panel showing the exact `pronunciations.json` path, loaded entry count, parse errors, and before/after replacement output.

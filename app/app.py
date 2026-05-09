@@ -135,6 +135,7 @@ def _init_db() -> None:
                 filename TEXT,
                 voice TEXT,
                 speed REAL,
+                pitch_ratio REAL DEFAULT 1.0,
                 max_chars INTEGER,
                 status TEXT,
                 created_at TEXT,
@@ -151,7 +152,14 @@ def _init_db() -> None:
                 rechapter_index INTEGER
             )
         """)
+        _ensure_job_column(conn, "pitch_ratio", "REAL DEFAULT 1.0")
         conn.commit()
+
+
+def _ensure_job_column(conn: sqlite3.Connection, name: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if name not in columns:
+        conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
 
 
 def _job_to_dict(row) -> dict:
@@ -425,7 +433,7 @@ def load_voices() -> dict:
     return {}
 
 
-def load_voice_presets() -> dict[str, str]:
+def load_voice_presets() -> dict[str, dict]:
     """Load named voice blend presets from voice_presets.json."""
     if VOICE_PRESETS_FILE.exists():
         try:
@@ -469,18 +477,35 @@ def normalize_voice_preset_name(name: str) -> str:
     return key
 
 
-def normalize_voice_presets(presets: dict) -> dict[str, str]:
-    normalized: dict[str, str] = {}
-    for name, blend in presets.items():
+def normalize_pitch_ratio(value) -> float:
+    pitch_ratio = float(value)
+    if pitch_ratio <= 0:
+        raise ValueError("Pitch ratio must be greater than zero.")
+    return pitch_ratio
+
+
+def normalize_voice_presets(presets: dict) -> dict[str, dict]:
+    normalized: dict[str, dict] = {}
+    for name, preset in presets.items():
         key = normalize_voice_preset_name(str(name))
-        normalized[key] = normalize_voice_blend(str(blend))
+        if isinstance(preset, dict):
+            voice = preset.get("voice", preset.get("blend", DEFAULT_VOICE))
+            pitch_ratio = preset.get("pitch_ratio", 1.0)
+        else:
+            voice = preset
+            pitch_ratio = 1.0
+        normalized[key] = {
+            "voice": normalize_voice_blend(str(voice)),
+            "pitch_ratio": normalize_pitch_ratio(pitch_ratio),
+        }
     return normalized
 
 
 def resolve_voice_preset(voice: str) -> str:
     voice = (voice or DEFAULT_VOICE).strip()
     presets = load_voice_presets()
-    return presets.get(voice.strip().lower(), voice)
+    preset = presets.get(voice.strip().lower())
+    return preset["voice"] if preset else voice
 
 
 def normalize_voice_profiles(voices: dict) -> dict:
@@ -495,7 +520,7 @@ def normalize_voice_profiles(voices: dict) -> dict:
         normalized[key] = {
             "voice": normalize_voice_blend(str(profile.get("voice", DEFAULT_VOICE))),
             "speed": float(profile.get("speed", DEFAULT_SPEED)),
-            "pitch_ratio": float(profile.get("pitch_ratio", 1.0)),
+            "pitch_ratio": normalize_pitch_ratio(profile.get("pitch_ratio", 1.0)),
         }
     return normalized
 
@@ -800,9 +825,10 @@ def record_job(job_id: str) -> None:
 
         voice = job["voice"]
         speed = job["speed"]
+        pitch_ratio = float(job.get("pitch_ratio") or 1.0)
         max_chars = job["max_chars"]
 
-        voice_slug = _safe_slug(f"{voice}_{speed:.2f}".replace(".", "_"))
+        voice_slug = _safe_slug(f"{voice}_{speed:.2f}_{pitch_ratio:.2f}".replace(".", "_"))
         stem = manuscript_path.stem
         build_id = f"{_safe_slug(stem)}_{voice_slug}_{source_hash}"
 
@@ -840,6 +866,7 @@ def record_job(job_id: str) -> None:
                 "source_hash": source_hash,
                 "voice": voice,
                 "speed": speed,
+                "pitch_ratio": pitch_ratio,
                 "max_chars": max_chars,
                 "build_id": build_id,
                 "chapters": [],
@@ -866,7 +893,10 @@ def record_job(job_id: str) -> None:
                         job_id[:8], ch_num, len(chapters), chapter["title"])
 
             voices_data = load_voices()
-            narrator_profile = voices_data.get("narrator", {"voice": voice, "speed": speed})
+            narrator_profile = voices_data.get(
+                "narrator",
+                {"voice": voice, "speed": speed, "pitch_ratio": pitch_ratio},
+            )
 
             clean_body = clean_markdown(chapter["body"])
             clean_body = apply_pronunciations(clean_body)
@@ -956,6 +986,7 @@ class JobRequest(BaseModel):
     filename: str
     voice: str = DEFAULT_VOICE
     speed: float = DEFAULT_SPEED
+    pitch_ratio: float = 1.0
     max_chars: int = DEFAULT_MAX_CHARS
 
 
@@ -989,6 +1020,7 @@ async def create_job(req: JobRequest, background_tasks: BackgroundTasks):
     validate_manuscript_filename(req.filename)
     try:
         voice = normalize_voice_blend(resolve_voice_preset(req.voice))
+        pitch_ratio = normalize_pitch_ratio(req.pitch_ratio)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     job_insert({
@@ -996,6 +1028,7 @@ async def create_job(req: JobRequest, background_tasks: BackgroundTasks):
         "filename": req.filename,
         "voice": voice,
         "speed": req.speed,
+        "pitch_ratio": pitch_ratio,
         "max_chars": req.max_chars,
         "status": "queued",
         "created_at": datetime.utcnow().isoformat(),
@@ -1134,8 +1167,9 @@ async def voice_preview(req: VoicePreviewRequest):
     text = req.text[:500]  # cap at 500 chars for safety
     try:
         audio = call_kokoro(text, req.voice, req.speed)
-        if abs(req.pitch_ratio - 1.0) >= 0.001:
-            audio = apply_pitch(audio, req.pitch_ratio)
+        pitch_ratio = normalize_pitch_ratio(req.pitch_ratio)
+        if abs(pitch_ratio - 1.0) >= 0.001:
+            audio = apply_pitch(audio, pitch_ratio)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
@@ -1219,6 +1253,7 @@ async def rechapter(build_id: str, chapter_index: int, background_tasks: Backgro
         "filename": manifest["source_file"],
         "voice": manifest["voice"],
         "speed": manifest["speed"],
+        "pitch_ratio": manifest.get("pitch_ratio", 1.0),
         "max_chars": manifest.get("max_chars", DEFAULT_MAX_CHARS),
         "status": "queued",
         "created_at": datetime.utcnow().isoformat(),
@@ -1260,11 +1295,15 @@ def record_single_chapter(job_id: str, build_id: str, manifest_path: Path) -> No
 
         voice = manifest["voice"]
         speed = manifest["speed"]
+        pitch_ratio = float(manifest.get("pitch_ratio") or 1.0)
         max_chars = manifest.get("max_chars", DEFAULT_MAX_CHARS)
         stem = manifest["book"]
 
         voices_data = load_voices()
-        narrator_profile = voices_data.get("narrator", {"voice": voice, "speed": speed})
+        narrator_profile = voices_data.get(
+            "narrator",
+            {"voice": voice, "speed": speed, "pitch_ratio": pitch_ratio},
+        )
 
         clean_body = clean_markdown(chapter["body"])
         clean_body = apply_pronunciations(clean_body)
@@ -1428,7 +1467,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
         build_rows += f"""
         <details>
           <summary><strong>{_h(b.get("book", build_id))}</strong>
-            &nbsp;|&nbsp; {_h(b.get("voice"))} @ {_h(b.get("speed"))}
+            &nbsp;|&nbsp; {_h(b.get("voice"))} @ {_h(b.get("speed"))} pitch {_h(b.get("pitch_ratio", 1.0))}
             &nbsp;|&nbsp; {_h(b.get("draft_date", ""))}
             &nbsp;<a href="/build/{build_id_url}/download/zip" title="Download all chapters as ZIP" style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; ZIP</a>
             {m4b_link}
@@ -1454,7 +1493,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     h2 {{ color: #aaa; font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; margin-top: 0; }}
     label {{ display: block; margin-bottom: 0.3rem; font-size: 0.85rem; color: #999; }}
     input, select {{ background: #222; border: 1px solid #444; color: #eee; padding: 0.4rem 0.6rem; border-radius: 4px; width: 100%; box-sizing: border-box; margin-bottom: 0.8rem; }}
-    .row {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.8rem; }}
+    .row {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.8rem; }}
     button {{ background: #e8c96e; color: #111; border: none; padding: 0.5rem 1.2rem; border-radius: 4px; cursor: pointer; font-weight: bold; }}
     button.stop {{ background: #c0392b; color: #fff; margin-left: 0.5rem; }}
     button:disabled {{ opacity: 0.4; cursor: default; }}
@@ -1502,6 +1541,10 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     <div>
       <label>Speed</label>
       <input type="number" id="speed-input" value="0.85" step="0.05" min="0.5" max="2.0">
+    </div>
+    <div>
+      <label>Pitch</label>
+      <input type="number" id="pitch-input" value="1.0" step="0.01" min="0.7" max="1.3">
     </div>
     <div>
       <label>Max chars / chunk</label>
@@ -1672,12 +1715,13 @@ async function startJob() {{
   const filename = document.getElementById('manuscript-select').value;
   const voice = document.getElementById('voice-select').value;
   const speed = parseFloat(document.getElementById('speed-input').value);
+  const pitch_ratio = parseFloat(document.getElementById('pitch-input').value);
   const max_chars = parseInt(document.getElementById('maxchars-input').value);
   if (!filename) {{ alert('Select a manuscript first.'); return; }}
   const resp = await fetch('/api/jobs', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify({{ filename, voice, speed, max_chars }})
+    body: JSON.stringify({{ filename, voice, speed, pitch_ratio, max_chars }})
   }});
   const data = await resp.json();
   currentJobId = data.job_id;
@@ -1697,6 +1741,7 @@ async function playVoicePreview() {{
   const text = document.getElementById('preview-text').value.trim();
   const voice = document.getElementById('voice-select').value;
   const speed = parseFloat(document.getElementById('speed-input').value);
+  const pitch_ratio = parseFloat(document.getElementById('pitch-input').value);
   const btn = document.getElementById('preview-btn');
   const player = document.getElementById('preview-player');
   if (!text) return;
@@ -1706,7 +1751,7 @@ async function playVoicePreview() {{
     const resp = await fetch('/api/preview/voice', {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ text, voice, speed }})
+      body: JSON.stringify({{ text, voice, speed, pitch_ratio }})
     }});
     if (!resp.ok) {{ btn.textContent = '▶ Play Preview'; btn.disabled = false; return; }}
     const blob = await resp.blob();
@@ -1724,13 +1769,14 @@ async function previewChapters() {{
   if (!filename) return;
   const voice = document.getElementById('voice-select').value;
   const speed = parseFloat(document.getElementById('speed-input').value);
+  const pitch_ratio = parseFloat(document.getElementById('pitch-input').value);
   const panel = document.getElementById('chapter-preview');
   panel.innerHTML = 'Loading…';
   panel.style.display = 'block';
   const resp = await fetch('/api/preview/chapters', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
-    body: JSON.stringify({{ filename, voice, speed }})
+    body: JSON.stringify({{ filename, voice, speed, pitch_ratio }})
   }});
   if (!resp.ok) {{ panel.innerHTML = 'Error loading chapters.'; return; }}
   const data = await resp.json();
@@ -1855,6 +1901,17 @@ const KOKORO_VOICES = [
   ['🇬🇧 British Male',    ['bm_fable','bm_george','bm_lewis']],
 ];
 
+function presetVoice(preset) {{
+  if (typeof preset === 'string') return preset;
+  return preset?.voice || preset?.blend || '{DEFAULT_VOICE}';
+}}
+
+function presetPitch(preset) {{
+  if (typeof preset === 'string') return 1.0;
+  const pitch = parseFloat(preset?.pitch_ratio);
+  return Number.isFinite(pitch) && pitch > 0 ? pitch : 1.0;
+}}
+
 function voiceOptionsHtml(selectedVal, allowEmpty = false, includePresets = true) {{
   let html = '';
   if (allowEmpty) {{
@@ -1862,8 +1919,10 @@ function voiceOptionsHtml(selectedVal, allowEmpty = false, includePresets = true
   }}
   if (includePresets && Object.keys(voicePresets).length) {{
     html += '<optgroup label="Voice Presets">';
-    for (const [name, blend] of Object.entries(voicePresets).sort()) {{
-      html += '<option value="' + escapeHtml(blend) + '"' + (blend === selectedVal ? ' selected' : '') + '>' + escapeHtml(name) + '</option>';
+    for (const [name, preset] of Object.entries(voicePresets).sort()) {{
+      const blend = presetVoice(preset);
+      const pitch = presetPitch(preset);
+      html += '<option value="' + escapeHtml(blend) + '" data-pitch="' + escapeHtml(pitch) + '"' + (blend === selectedVal ? ' selected' : '') + '>' + escapeHtml(name) + '</option>';
     }}
     html += '</optgroup>';
   }}
@@ -1884,6 +1943,25 @@ function renderMainVoiceSelect() {{
   select.innerHTML = voiceOptionsHtml(selected, false, true);
   if ([...select.options].some(opt => opt.value === selected)) select.value = selected;
   else select.value = '{DEFAULT_VOICE}';
+  select.onchange = () => applyPresetPitchFromSelect(select);
+}}
+
+function applyPresetPitchFromSelect(select) {{
+  const opt = select.selectedOptions && select.selectedOptions[0];
+  const pitch = opt ? opt.dataset.pitch : null;
+  if (!pitch) return;
+  let target = null;
+  if (select.id === 'voice-select') {{
+    target = document.getElementById('pitch-input');
+  }} else if (select.id.startsWith('preset_new_voice_')) {{
+    target = document.getElementById('new-preset-pitch');
+  }} else if (select.id.startsWith('vb_')) {{
+    const rowId = select.id.slice(3).split('_voice_')[0];
+    target = rowId === 'new'
+      ? document.getElementById('new-char-pitch')
+      : document.getElementById('vp_' + rowId);
+  }}
+  if (target) target.value = pitch;
 }}
 
 // Parse "af_bella(0.6)+bm_george(0.4)" → [{{voice, weight}}, ...]
@@ -1916,7 +1994,7 @@ function buildBlend(slots) {{
 
 function voiceSelectHtml(id, selectedVal, allowEmpty = false) {{
   const sStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;flex:1;min-width:0;';
-  let s = '<select id="' + id + '" style="' + sStyle + '">';
+  let s = '<select id="' + id + '" onchange="applyPresetPitchFromSelect(this)" style="' + sStyle + '">';
   s += voiceOptionsHtml(selectedVal, allowEmpty, true);
   s += '</select>';
   return s;
@@ -1960,14 +2038,18 @@ function renderVoicePresets() {{
   html += '<thead><tr style="color:#666;border-bottom:1px solid #333">';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Preset</th>';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Blend</th>';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Pitch</th>';
   html += '<th></th></tr></thead><tbody>';
   if (Object.keys(voicePresets).length === 0) {{
-    html += '<tr><td colspan="3" style="color:#555;padding:0.4rem 0.4rem;font-size:0.8rem;font-style:italic">No presets yet. Fill the add row below, then click + Add to create one.</td></tr>';
+    html += '<tr><td colspan="4" style="color:#555;padding:0.4rem 0.4rem;font-size:0.8rem;font-style:italic">No presets yet. Fill the add row below, then click + Add to create one.</td></tr>';
   }}
-  for (const [name, blend] of Object.entries(voicePresets).sort()) {{
+  for (const [name, preset] of Object.entries(voicePresets).sort()) {{
+    const blend = presetVoice(preset);
+    const pitch = presetPitch(preset);
     html += '<tr>';
     html += '<td style="padding:0.3rem 0.4rem;color:#e8c96e;white-space:nowrap">' + escapeHtml(name) + '</td>';
     html += '<td style="padding:0.3rem 0.4rem"><code style="color:#aaa;background:#222;padding:0.1rem 0.3rem;border-radius:3px">' + escapeHtml(blend) + '</code></td>';
+    html += '<td style="padding:0.3rem 0.4rem;color:#aaa">' + escapeHtml(pitch) + '</td>';
     html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
     html += '<button data-name="' + escapeHtml(name) + '" onclick="testVoicePreset(this.dataset.name,this)" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;">Test</button>';
     html += ' <button data-name="' + escapeHtml(name) + '" onclick="deleteVoicePreset(this.dataset.name)" style="background:#333;color:#c0392b;padding:0.1rem 0.5rem;font-size:0.75rem;">&#10005;</button>';
@@ -1976,6 +2058,7 @@ function renderVoicePresets() {{
   html += '</tbody><tfoot><tr style="border-top:1px solid #333">';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-preset-name" type="text" placeholder="preset_name" style="width:100%;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem">' + blendEditorHtml('preset_new', '{DEFAULT_VOICE}') + '</td>';
+  html += '<td style="padding:0.4rem 0.4rem"><input id="new-preset-pitch" type="number" value="1.0" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem;white-space:nowrap">';
   html += '<button onclick="testNewVoicePreset()" style="background:#333;color:#ccc;margin-right:0.3rem;">▶ Test</button>';
   html += '<button onclick="addVoicePreset()" style="background:#333;color:#ccc;">+ Add</button>';
@@ -2006,7 +2089,11 @@ async function addVoicePreset() {{
   const nameEl = document.getElementById('new-preset-name');
   const name = normalizePresetName(nameEl ? nameEl.value : '');
   if (!name) return;
-  voicePresets[name] = readBlendFromDom('preset_new');
+  const pitch = parseFloat(document.getElementById('new-preset-pitch').value) || 1.0;
+  voicePresets[name] = {{
+    voice: readBlendFromDom('preset_new'),
+    pitch_ratio: pitch,
+  }};
   if (await saveVoicePresets()) {{
     await loadVoicePresets();
     renderVoicesTable();
@@ -2024,7 +2111,7 @@ async function deleteVoicePreset(name) {{
   renderVoicesTable();
 }}
 
-async function playPresetPreview(voice, btn) {{
+async function playPresetPreview(voice, pitchRatio, btn) {{
   const text = document.getElementById('preview-text').value.trim() ||
     'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
   if (btn) {{ btn.disabled = true; btn.textContent = '\u2026'; }}
@@ -2033,7 +2120,7 @@ async function playPresetPreview(voice, btn) {{
     const resp = await fetch('/api/preview/voice', {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ text, voice, speed }})
+      body: JSON.stringify({{ text, voice, speed, pitch_ratio: pitchRatio || 1.0 }})
     }});
     if (resp.ok) {{
       const blob = await resp.blob();
@@ -2051,14 +2138,15 @@ async function playPresetPreview(voice, btn) {{
 
 async function testVoicePreset(name, btn) {{
   if (btn) btn.dataset.label = 'Test';
-  const voice = voicePresets[name];
-  if (voice) await playPresetPreview(voice, btn);
+  const preset = voicePresets[name];
+  if (preset) await playPresetPreview(presetVoice(preset), presetPitch(preset), btn);
 }}
 
 async function testNewVoicePreset() {{
   const btn = document.querySelector('button[onclick="testNewVoicePreset()"]');
   if (btn) btn.dataset.label = '\u25b6 Test';
-  await playPresetPreview(readBlendFromDom('preset_new'), btn);
+  const pitch = parseFloat(document.getElementById('new-preset-pitch').value) || 1.0;
+  await playPresetPreview(readBlendFromDom('preset_new'), pitch, btn);
 }}
 
 

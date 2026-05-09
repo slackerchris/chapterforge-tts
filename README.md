@@ -177,12 +177,18 @@ Use **Voice Presets** in the web UI to save a blend as a reusable named voice. P
 
 ```json
 {
-  "warm_bard": "af_bella(0.65)+bm_george(0.35)",
-  "soft_elder": "af_nicole(0.5)+bm_fable(0.5)"
+  "warm_bard": {
+    "voice": "af_bella(0.65)+bm_george(0.35)",
+    "pitch_ratio": 0.98
+  },
+  "soft_elder": {
+    "voice": "af_nicole(0.5)+bm_fable(0.5)",
+    "pitch_ratio": 0.92
+  }
 }
 ```
 
-Saved presets appear in the Record voice dropdown and in character voice blend selectors. Delete a preset with the `×` button in the Voice Presets section.
+Saved presets appear in the Record voice dropdown and in character voice blend selectors. Selecting a preset copies its `pitch_ratio` into the active pitch field. Delete a preset with the `×` button in the Voice Presets section.
 
 ### Pitch shifting
 
