@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.16] - 2026-05-09
+### Changed
+- Clarified the UI distinction between reusable Voice Presets and per-character voice assignments.
+
+### Fixed
+- Character voice assignments now show a delete button for `narrator` as well as named characters.
+
+---
+
 ## [0.6.15] - 2026-05-09
 ### Added
 - Voice presets stored in `voice_presets.json`, letting named blends appear in the Record voice dropdown and character voice blend selectors.

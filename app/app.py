@@ -1446,12 +1446,13 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
 
 <section>
   <h2>Voice Presets</h2>
+  <p style="font-size:0.8rem;color:#666;margin-top:0;">Save reusable blends here. Saved presets appear in the Record voice dropdown and in character blend selectors; each saved preset row has a delete button.</p>
   <div id="voice-presets-container">Loading&hellip;</div>
 </section>
 
 <section>
   <h2>Character Voices</h2>
-  <p style="font-size:0.8rem;color:#666;margin-top:0;">Tag dialogue with <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">::character::</code> at the start of a paragraph. Untagged paragraphs use the narrator voice. Supports blends: <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">af_bella(0.6)+bm_george(0.4)</code></p>
+  <p style="font-size:0.8rem;color:#666;margin-top:0;">Assign a built-in voice, saved preset, or custom blend to a manuscript speaker. Tag dialogue with <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">::character::</code>. Untagged paragraphs use <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">narrator</code> if it exists, otherwise the Record voice.</p>
   <div id="voices-container">Loading&hellip;</div>
 </section>
 
@@ -1827,7 +1828,7 @@ function renderVoicePresets() {{
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Blend</th>';
   html += '<th></th></tr></thead><tbody>';
   if (Object.keys(voicePresets).length === 0) {{
-    html += '<tr><td colspan="3" style="color:#555;padding:0.4rem 0.4rem;font-size:0.8rem;font-style:italic">No presets yet.</td></tr>';
+    html += '<tr><td colspan="3" style="color:#555;padding:0.4rem 0.4rem;font-size:0.8rem;font-style:italic">No presets yet. Fill the add row below, then click + Add to create one.</td></tr>';
   }}
   for (const [name, blend] of Object.entries(voicePresets).sort()) {{
     html += '<tr>';
@@ -1940,7 +1941,7 @@ function renderVoicesTable() {{
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Pitch</th>';
   html += '<th></th></tr></thead><tbody>';
   if (Object.keys(voicesData).length === 0) {{
-    html += '<tr><td colspan="5" style="color:#555;padding:0.4rem 0.4rem;font-size:0.8rem;font-style:italic">No characters yet. Add a <strong style="color:#666">narrator</strong> row to override the default voice per-book.</td></tr>';
+    html += '<tr><td colspan="5" style="color:#555;padding:0.4rem 0.4rem;font-size:0.8rem;font-style:italic">No character assignments yet. Add <strong style="color:#666">narrator</strong> to override the Record voice for untagged paragraphs.</td></tr>';
   }}
   for (const [name, p] of Object.entries(voicesData)) {{
     const nc = name === 'narrator' ? '#e8c96e' : '#ccc';
@@ -1951,9 +1952,7 @@ function renderVoicesTable() {{
     html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
     html += '<button data-name="' + name + '" onclick="testCharVoice(this.dataset.name)" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;">Test</button>';
-    if (name !== 'narrator') {{
-      html += ' <button data-name="' + name + '" onclick="removeCharVoice(this.dataset.name)" style="background:#333;color:#c0392b;padding:0.1rem 0.5rem;font-size:0.75rem;">&#10005;</button>';
-    }}
+    html += ' <button data-name="' + name + '" onclick="removeCharVoice(this.dataset.name)" title="Delete this character voice assignment" style="background:#333;color:#c0392b;padding:0.1rem 0.5rem;font-size:0.75rem;">&#10005;</button>';
     html += '</td></tr>';
   }}
   html += '</tbody><tfoot><tr style="border-top:1px solid #333">';
@@ -2002,6 +2001,7 @@ function addCharVoice() {{
 }}
 
 function removeCharVoice(name) {{
+  if (!confirm(`Delete character voice assignment "${{name}}"?`)) return;
   syncDomToVoicesData();
   delete voicesData[name];
   renderVoicesTable();
