@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.14] - 2026-05-09
+### Added
+- Restored weighted Kokoro voice blending end to end. Blend strings such as `af_bella(0.6)+bm_george(0.4)` are now preserved, normalized, previewed, saved, and sent to Kokoro instead of being reduced to the first voice.
+- Character voice rows now expose a compact three-slot blend editor with per-voice weights.
+
+### Fixed
+- Character voice previews now apply `pitch_ratio`, matching full chapter generation.
+- Hardened manuscript filenames and escaped rendered build/chapter/status text in the web UI.
+
+---
+
 ## [0.6.13] - 2026-05-08
 ### Fixed
 - Voice normalisation now strips both the `+secondary` blend suffix AND legacy `(weight)` suffixes (e.g. `am_michael(1)` → `am_michael`). Previously only the `+` split was applied, leaving the weight in the voice name and causing a 500.
