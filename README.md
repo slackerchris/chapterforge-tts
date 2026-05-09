@@ -15,6 +15,7 @@ A lightweight self-hosted web app that takes a Markdown or plain-text manuscript
 - Per-job voice and speed selection
 - **Character voice profiles** — tag paragraphs with `::character::` to use per-character voice, speed, and pitch
 - **Voice blending** — mix multiple Kokoro voices with weighted blends
+- **Voice presets** — save named blends and reuse them from dropdowns
 - **Pitch shifting** via ffmpeg (per character, no re-recording needed)
 - Start / stop jobs between chunks
 - **Partial resume** — interrupted jobs pick up where they left off
@@ -77,6 +78,7 @@ services:
 | `KOKORO_TIMEOUT` | `300.0` | Per-request timeout in seconds |
 | `WEBHOOK_URL` | _(empty)_ | POST target for job complete / error notifications |
 | `VOICES_FILE` | `/app/books/voices.json` | Path to the character voices config file |
+| `VOICE_PRESETS_FILE` | `/app/books/voice_presets.json` | Path to named voice blend presets |
 | `DB_PATH` | `/app/output/chapterforge.db` | SQLite database path |
 
 ---
@@ -139,6 +141,19 @@ af_bella(0.5)+af_sky(0.3)+bm_george(0.2)
 ```
 
 Weights don't need to sum to 1.0 — Kokoro normalises them.
+
+### Voice presets
+
+Use **Voice Presets** in the web UI to save a blend as a reusable named voice. Presets are stored in `voice_presets.json`:
+
+```json
+{
+  "warm_bard": "af_bella(0.65)+bm_george(0.35)",
+  "soft_elder": "af_nicole(0.5)+bm_fable(0.5)"
+}
+```
+
+Saved presets appear in the Record voice dropdown and in character voice blend selectors. Delete a preset with the `×` button in the Voice Presets section.
 
 ### Pitch shifting
 

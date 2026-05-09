@@ -95,6 +95,7 @@ BOOKS_DIR = Path(os.environ.get("BOOKS_DIR", "/app/books"))
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/app/output"))
 PRONUNCIATIONS_FILE = Path(os.environ.get("PRONUNCIATIONS_FILE", "/app/books/pronunciations.json"))
 VOICES_FILE = Path(os.environ.get("VOICES_FILE", "/app/books/voices.json"))
+VOICE_PRESETS_FILE = Path(os.environ.get("VOICE_PRESETS_FILE", "/app/books/voice_presets.json"))
 
 BOOKS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -356,6 +357,7 @@ def apply_pronunciations(text: str) -> str:
 
 SPEAKER_TAG_RE = re.compile(r"^::([\w][\w\s]*)::[ \t]*", re.MULTILINE)
 VOICE_BLEND_PART_RE = re.compile(r"^([^\s+()]+)\s*(?:\(\s*(\d+(?:\.\d+)?|\.\d+)\s*\))?$")
+VOICE_PRESET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def load_voices() -> dict:
@@ -365,6 +367,17 @@ def load_voices() -> dict:
             return json.loads(VOICES_FILE.read_text(encoding="utf-8"))
         except Exception:
             pass
+    return {}
+
+
+def load_voice_presets() -> dict[str, str]:
+    """Load named voice blend presets from voice_presets.json."""
+    if VOICE_PRESETS_FILE.exists():
+        try:
+            raw = json.loads(VOICE_PRESETS_FILE.read_text(encoding="utf-8"))
+            return normalize_voice_presets(raw)
+        except Exception as exc:
+            logger.warning("Could not load voice presets file: %s", exc)
     return {}
 
 
@@ -389,6 +402,30 @@ def normalize_voice_blend(voice: str) -> str:
             raise ValueError(f"Voice blend weights must be greater than zero: {part!r}")
         normalized.append(f"{voice_name}({weight_value:g})")
     return "+".join(normalized)
+
+
+def normalize_voice_preset_name(name: str) -> str:
+    key = (name or "").strip().lower().replace(" ", "_")
+    if not VOICE_PRESET_NAME_RE.match(key):
+        raise ValueError(
+            "Preset names must start with a letter or number and contain only "
+            "lowercase letters, numbers, underscores, or hyphens."
+        )
+    return key
+
+
+def normalize_voice_presets(presets: dict) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for name, blend in presets.items():
+        key = normalize_voice_preset_name(str(name))
+        normalized[key] = normalize_voice_blend(str(blend))
+    return normalized
+
+
+def resolve_voice_preset(voice: str) -> str:
+    voice = (voice or DEFAULT_VOICE).strip()
+    presets = load_voice_presets()
+    return presets.get(voice.strip().lower(), voice)
 
 
 def normalize_voice_profiles(voices: dict) -> dict:
@@ -595,7 +632,7 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
     Retries up to KOKORO_RETRIES times on transient errors (timeouts, 5xx).
     Raises on the final failure.
     """
-    voice = normalize_voice_blend(voice)
+    voice = normalize_voice_blend(resolve_voice_preset(voice))
 
     payload = {
         "model": "kokoro",
@@ -896,7 +933,7 @@ async def create_job(req: JobRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
     validate_manuscript_filename(req.filename)
     try:
-        voice = normalize_voice_blend(req.voice)
+        voice = normalize_voice_blend(resolve_voice_preset(req.voice))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     job_insert({
@@ -955,6 +992,10 @@ class VoicesUpdateRequest(BaseModel):
     voices: dict
 
 
+class VoicePresetsUpdateRequest(BaseModel):
+    presets: dict
+
+
 @app.get("/api/voices")
 async def get_voices():
     return load_voices()
@@ -969,6 +1010,37 @@ async def save_voices_route(req: VoicesUpdateRequest):
     VOICES_FILE.parent.mkdir(parents=True, exist_ok=True)
     VOICES_FILE.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
     return {"status": "saved", "count": len(normalized)}
+
+
+@app.get("/api/voice-presets")
+async def get_voice_presets():
+    return load_voice_presets()
+
+
+@app.post("/api/voice-presets")
+async def save_voice_presets_route(req: VoicePresetsUpdateRequest):
+    try:
+        normalized = normalize_voice_presets(req.presets)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    VOICE_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    VOICE_PRESETS_FILE.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+    return {"status": "saved", "count": len(normalized)}
+
+
+@app.delete("/api/voice-presets/{preset_name}")
+async def delete_voice_preset(preset_name: str):
+    try:
+        key = normalize_voice_preset_name(preset_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    presets = load_voice_presets()
+    if key not in presets:
+        raise HTTPException(status_code=404, detail="Voice preset not found.")
+    del presets[key]
+    VOICE_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    VOICE_PRESETS_FILE.write_text(json.dumps(presets, indent=2), encoding="utf-8")
+    return {"status": "deleted", "name": key}
 
 
 class VoicePreviewRequest(BaseModel):
@@ -1347,29 +1419,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
   <div class="row">
     <div>
       <label>Voice</label>
-      <select id="voice-select">
-        <optgroup label="🇺🇸 American Female">
-          <option value="af_alloy">af_alloy</option>
-          <option value="af_aoede">af_aoede</option>
-          <option value="af_bella" selected>af_bella</option>
-          <option value="af_heart">af_heart</option>
-          <option value="af_nicole">af_nicole</option>
-          <option value="af_sarah">af_sarah</option>
-          <option value="af_sky">af_sky</option>
-        </optgroup>
-        <optgroup label="🇺🇸 American Male">
-          <option value="am_adam">am_adam</option>
-          <option value="am_michael">am_michael</option>
-        </optgroup>
-        <optgroup label="🇬🇧 British Female">
-          <option value="bf_emma">bf_emma</option>
-          <option value="bf_isabella">bf_isabella</option>
-        </optgroup>
-        <optgroup label="🇬🇧 British Male">
-          <option value="bm_george">bm_george</option>
-          <option value="bm_lewis">bm_lewis</option>
-        </optgroup>
-      </select>
+      <select id="voice-select"></select>
     </div>
     <div>
       <label>Speed</label>
@@ -1395,6 +1445,11 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
 </section>
 
 <section>
+  <h2>Voice Presets</h2>
+  <div id="voice-presets-container">Loading&hellip;</div>
+</section>
+
+<section>
   <h2>Character Voices</h2>
   <p style="font-size:0.8rem;color:#666;margin-top:0;">Tag dialogue with <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">::character::</code> at the start of a paragraph. Untagged paragraphs use the narrator voice. Supports blends: <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">af_bella(0.6)+bm_george(0.4)</code></p>
   <div id="voices-container">Loading&hellip;</div>
@@ -1414,6 +1469,7 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
 let currentJobId = null;
 let pollTimer = null;
 let voicesData = {{}};
+let voicePresets = {{}};
 
 function escapeHtml(value) {{
   return String(value ?? '').replace(/[&<>"']/g, ch => ({{
@@ -1427,6 +1483,7 @@ function escapeHtml(value) {{
 
 // On load, check localStorage for an in-progress job and reconnect if still active
 window.addEventListener('DOMContentLoaded', async () => {{
+  await loadVoicePresets();
   await loadVoices();
   const saved = localStorage.getItem('chapterforge_job_id');
   if (saved) {{
@@ -1645,12 +1702,54 @@ async function loadVoices() {{
   }}
 }}
 
+async function loadVoicePresets() {{
+  try {{
+    const resp = await fetch('/api/voice-presets');
+    voicePresets = resp.ok ? await resp.json() : {{}};
+  }} catch (e) {{
+    voicePresets = {{}};
+  }}
+  renderMainVoiceSelect();
+  renderVoicePresets();
+}}
+
 const KOKORO_VOICES = [
   ['🇺🇸 American Female', ['af_alloy','af_aoede','af_bella','af_heart','af_nicole','af_sarah','af_sky']],
   ['🇺🇸 American Male',   ['am_adam','am_echo','am_fenrir','am_liam','am_michael']],
   ['🇬🇧 British Female',  ['bf_emma','bf_isabella']],
   ['🇬🇧 British Male',    ['bm_fable','bm_george','bm_lewis']],
 ];
+
+function voiceOptionsHtml(selectedVal, allowEmpty = false, includePresets = true) {{
+  let html = '';
+  if (allowEmpty) {{
+    html += '<option value=""' + (!selectedVal ? ' selected' : '') + '>none</option>';
+  }}
+  if (includePresets && Object.keys(voicePresets).length) {{
+    html += '<optgroup label="Voice Presets">';
+    for (const [name, blend] of Object.entries(voicePresets).sort()) {{
+      html += '<option value="' + escapeHtml(blend) + '"' + (blend === selectedVal ? ' selected' : '') + '>' + escapeHtml(name) + '</option>';
+    }}
+    html += '</optgroup>';
+  }}
+  for (const [label, voices] of KOKORO_VOICES) {{
+    html += '<optgroup label="' + escapeHtml(label) + '">';
+    for (const v of voices) {{
+      html += '<option value="' + escapeHtml(v) + '"' + (v === selectedVal ? ' selected' : '') + '>' + escapeHtml(v) + '</option>';
+    }}
+    html += '</optgroup>';
+  }}
+  return html;
+}}
+
+function renderMainVoiceSelect() {{
+  const select = document.getElementById('voice-select');
+  if (!select) return;
+  const selected = select.value || '{DEFAULT_VOICE}';
+  select.innerHTML = voiceOptionsHtml(selected, false, true);
+  if ([...select.options].some(opt => opt.value === selected)) select.value = selected;
+  else select.value = '{DEFAULT_VOICE}';
+}}
 
 // Parse "af_bella(0.6)+bm_george(0.4)" → [{{voice, weight}}, ...]
 // Single voice "af_bella" → [{{voice:'af_bella', weight:1.0}}]
@@ -1666,9 +1765,15 @@ function parseBlend(str) {{
 
 // [{{voice, weight}}, ...] → "af_bella(0.6)+bm_george(0.4)".
 function buildBlend(slots) {{
-  const filtered = slots
-    .filter(s => s.voice)
-    .map(s => ({{ voice: s.voice, weight: Number.isFinite(s.weight) && s.weight > 0 ? s.weight : 1.0 }}));
+  const filtered = [];
+  for (const slot of slots.filter(s => s.voice)) {{
+    const slotWeight = Number.isFinite(slot.weight) && slot.weight > 0 ? slot.weight : 1.0;
+    for (const part of parseBlend(slot.voice)) {{
+      if (!part.voice) continue;
+      const partWeight = Number.isFinite(part.weight) && part.weight > 0 ? part.weight : 1.0;
+      filtered.push({{ voice: part.voice, weight: partWeight * slotWeight }});
+    }}
+  }}
   if (!filtered.length) return '{DEFAULT_VOICE}';
   if (filtered.length === 1) return filtered[0].voice;
   return filtered.map(s => `${{s.voice}}(${{Number(s.weight.toFixed(3))}})`).join('+');
@@ -1677,16 +1782,7 @@ function buildBlend(slots) {{
 function voiceSelectHtml(id, selectedVal, allowEmpty = false) {{
   const sStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;flex:1;min-width:0;';
   let s = '<select id="' + id + '" style="' + sStyle + '">';
-  if (allowEmpty) {{
-    s += '<option value=""' + (!selectedVal ? ' selected' : '') + '>none</option>';
-  }}
-  for (const [label, voices] of KOKORO_VOICES) {{
-    s += '<optgroup label="' + label + '">';
-    for (const v of voices) {{
-      s += '<option value="' + v + '"' + (v === selectedVal ? ' selected' : '') + '>' + v + '</option>';
-    }}
-    s += '</optgroup>';
-  }}
+  s += voiceOptionsHtml(selectedVal, allowEmpty, true);
   s += '</select>';
   return s;
 }}
@@ -1719,6 +1815,115 @@ function readBlendFromDom(prefix) {{
     slots.push({{voice: vEl.value, weight: Number.isFinite(weight) && weight > 0 ? weight : 1.0}});
   }}
   return buildBlend(slots);
+}}
+
+function renderVoicePresets() {{
+  const container = document.getElementById('voice-presets-container');
+  if (!container) return;
+  const iStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;';
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
+  html += '<thead><tr style="color:#666;border-bottom:1px solid #333">';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Preset</th>';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Blend</th>';
+  html += '<th></th></tr></thead><tbody>';
+  if (Object.keys(voicePresets).length === 0) {{
+    html += '<tr><td colspan="3" style="color:#555;padding:0.4rem 0.4rem;font-size:0.8rem;font-style:italic">No presets yet.</td></tr>';
+  }}
+  for (const [name, blend] of Object.entries(voicePresets).sort()) {{
+    html += '<tr>';
+    html += '<td style="padding:0.3rem 0.4rem;color:#e8c96e;white-space:nowrap">' + escapeHtml(name) + '</td>';
+    html += '<td style="padding:0.3rem 0.4rem"><code style="color:#aaa;background:#222;padding:0.1rem 0.3rem;border-radius:3px">' + escapeHtml(blend) + '</code></td>';
+    html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
+    html += '<button data-name="' + escapeHtml(name) + '" onclick="testVoicePreset(this.dataset.name,this)" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;">Test</button>';
+    html += ' <button data-name="' + escapeHtml(name) + '" onclick="deleteVoicePreset(this.dataset.name)" style="background:#333;color:#c0392b;padding:0.1rem 0.5rem;font-size:0.75rem;">&#10005;</button>';
+    html += '</td></tr>';
+  }}
+  html += '</tbody><tfoot><tr style="border-top:1px solid #333">';
+  html += '<td style="padding:0.4rem 0.4rem"><input id="new-preset-name" type="text" placeholder="preset_name" style="width:100%;' + iStyle + '"></td>';
+  html += '<td style="padding:0.4rem 0.4rem">' + blendEditorHtml('preset_new', '{DEFAULT_VOICE}') + '</td>';
+  html += '<td style="padding:0.4rem 0.4rem;white-space:nowrap">';
+  html += '<button onclick="testNewVoicePreset()" style="background:#333;color:#ccc;margin-right:0.3rem;">▶ Test</button>';
+  html += '<button onclick="addVoicePreset()" style="background:#333;color:#ccc;">+ Add</button>';
+  html += '</td></tr></tfoot></table>';
+  html += '<audio id="preset-preview-player" style="display:none;margin-top:0.5rem;width:100%;" controls></audio>';
+  container.innerHTML = html;
+}}
+
+function normalizePresetName(name) {{
+  return name.trim().toLowerCase().replace(/\\s+/g, '_');
+}}
+
+async function saveVoicePresets() {{
+  const resp = await fetch('/api/voice-presets', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ presets: voicePresets }})
+  }});
+  if (!resp.ok) {{
+    const data = await resp.json().catch(() => ({{detail: 'Failed to save presets.'}}));
+    alert(data.detail || 'Failed to save presets.');
+    return false;
+  }}
+  return true;
+}}
+
+async function addVoicePreset() {{
+  const nameEl = document.getElementById('new-preset-name');
+  const name = normalizePresetName(nameEl ? nameEl.value : '');
+  if (!name) return;
+  voicePresets[name] = readBlendFromDom('preset_new');
+  if (await saveVoicePresets()) {{
+    await loadVoicePresets();
+    renderVoicesTable();
+  }}
+}}
+
+async function deleteVoicePreset(name) {{
+  if (!confirm(`Delete voice preset "${{name}}"?`)) return;
+  const resp = await fetch(`/api/voice-presets/${{encodeURIComponent(name)}}`, {{ method: 'DELETE' }});
+  if (!resp.ok) {{
+    alert('Failed to delete preset.');
+    return;
+  }}
+  await loadVoicePresets();
+  renderVoicesTable();
+}}
+
+async function playPresetPreview(voice, btn) {{
+  const text = document.getElementById('preview-text').value.trim() ||
+    'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
+  if (btn) {{ btn.disabled = true; btn.textContent = '\u2026'; }}
+  try {{
+    const speed = parseFloat(document.getElementById('speed-input').value) || {DEFAULT_SPEED};
+    const resp = await fetch('/api/preview/voice', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ text, voice, speed }})
+    }});
+    if (resp.ok) {{
+      const blob = await resp.blob();
+      const player = document.getElementById('preset-preview-player');
+      if (player) {{
+        player.src = URL.createObjectURL(blob);
+        player.style.display = 'block';
+        player.play();
+      }}
+    }}
+  }} finally {{
+    if (btn) {{ btn.disabled = false; btn.textContent = btn.dataset.label || 'Test'; }}
+  }}
+}}
+
+async function testVoicePreset(name, btn) {{
+  if (btn) btn.dataset.label = 'Test';
+  const voice = voicePresets[name];
+  if (voice) await playPresetPreview(voice, btn);
+}}
+
+async function testNewVoicePreset() {{
+  const btn = document.querySelector('button[onclick="testNewVoicePreset()"]');
+  if (btn) btn.dataset.label = '\u25b6 Test';
+  await playPresetPreview(readBlendFromDom('preset_new'), btn);
 }}
 
 

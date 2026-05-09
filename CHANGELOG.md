@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.15] - 2026-05-09
+### Added
+- Voice presets stored in `voice_presets.json`, letting named blends appear in the Record voice dropdown and character voice blend selectors.
+- Voice Presets UI for creating, previewing, and deleting named blend presets.
+
+---
+
 ## [0.6.14] - 2026-05-09
 ### Added
 - Restored weighted Kokoro voice blending end to end. Blend strings such as `af_bella(0.6)+bm_george(0.4)` are now preserved, normalized, previewed, saved, and sent to Kokoro instead of being reduced to the first voice.
