@@ -20,7 +20,9 @@ import shutil
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
+from html import escape as html_escape
 from typing import Optional
+from urllib.parse import quote
 
 import requests
 import aiofiles
@@ -96,6 +98,8 @@ VOICES_FILE = Path(os.environ.get("VOICES_FILE", "/app/books/voices.json"))
 
 BOOKS_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+ALLOWED_MANUSCRIPT_SUFFIXES = {".md", ".txt"}
 
 # ---------------------------------------------------------------------------
 # App
@@ -186,6 +190,26 @@ def jobs_list_recent(limit: int = 100) -> list[dict]:
             "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?", (limit,)
         ).fetchall()
     return [_job_to_dict(r) for r in rows]
+
+
+def validate_manuscript_filename(filename: str) -> str:
+    """Return a safe manuscript filename relative to BOOKS_DIR."""
+    if not filename:
+        raise HTTPException(status_code=400, detail="Missing manuscript filename.")
+    path = Path(filename)
+    if path.name != filename or "/" in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid manuscript filename.")
+    if path.suffix.lower() not in ALLOWED_MANUSCRIPT_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Only .md and .txt files are supported.")
+    return filename
+
+
+def manuscript_path_for(filename: str) -> Path:
+    filename = validate_manuscript_filename(filename)
+    path = BOOKS_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Manuscript not found.")
+    return path
 
 
 # In-memory stop_requested flags (not persisted — only meaningful while process runs)
@@ -331,6 +355,7 @@ def apply_pronunciations(text: str) -> str:
 
 
 SPEAKER_TAG_RE = re.compile(r"^::([\w][\w\s]*)::[ \t]*", re.MULTILINE)
+VOICE_BLEND_PART_RE = re.compile(r"^([^\s+()]+)\s*(?:\(\s*(\d+(?:\.\d+)?|\.\d+)\s*\))?$")
 
 
 def load_voices() -> dict:
@@ -341,6 +366,46 @@ def load_voices() -> dict:
         except Exception:
             pass
     return {}
+
+
+def normalize_voice_blend(voice: str) -> str:
+    """Normalize and lightly validate a Kokoro voice or weighted voice blend."""
+    voice = (voice or DEFAULT_VOICE).strip()
+    parts = [p.strip() for p in voice.split("+") if p.strip()]
+    if not parts:
+        return DEFAULT_VOICE
+
+    normalized: list[str] = []
+    for part in parts:
+        match = VOICE_BLEND_PART_RE.match(part)
+        if not match:
+            raise ValueError(f"Invalid voice blend part: {part!r}")
+        voice_name, weight = match.groups()
+        if weight is None:
+            normalized.append(voice_name)
+            continue
+        weight_value = float(weight)
+        if weight_value <= 0:
+            raise ValueError(f"Voice blend weights must be greater than zero: {part!r}")
+        normalized.append(f"{voice_name}({weight_value:g})")
+    return "+".join(normalized)
+
+
+def normalize_voice_profiles(voices: dict) -> dict:
+    """Normalize persisted character voice profiles before saving."""
+    normalized: dict[str, dict] = {}
+    for name, profile in voices.items():
+        if not isinstance(profile, dict):
+            raise ValueError(f"Voice profile for {name!r} must be an object.")
+        key = name.strip().lower()
+        if not key:
+            continue
+        normalized[key] = {
+            "voice": normalize_voice_blend(str(profile.get("voice", DEFAULT_VOICE))),
+            "speed": float(profile.get("speed", DEFAULT_SPEED)),
+            "pitch_ratio": float(profile.get("pitch_ratio", 1.0)),
+        }
+    return normalized
 
 
 def parse_segments(text: str) -> list[tuple[str, str]]:
@@ -530,13 +595,7 @@ def call_kokoro(text: str, voice: str, speed: float) -> bytes:
     Retries up to KOKORO_RETRIES times on transient errors (timeouts, 5xx).
     Raises on the final failure.
     """
-    # Strip any legacy blend strings (e.g. "af_bella+af_sky" or "am_michael(1)+bm_george(0.5)")
-    # down to just the first plain voice name.
-    if "+" in voice or re.search(r"\(\d", voice):
-        # Split on + and take first part, then strip any trailing (weight)
-        primary = re.sub(r"\([^)]*\)", "", voice.split("+")[0]).strip()
-        logger.warning("Legacy voice string %r normalised to %r", voice, primary)
-        voice = primary
+    voice = normalize_voice_blend(voice)
 
     payload = {
         "model": "kokoro",
@@ -640,7 +699,7 @@ def record_job(job_id: str) -> None:
                 job_id[:8], job["filename"], job["voice"], job["speed"])
 
     try:
-        manuscript_path = BOOKS_DIR / job["filename"]
+        manuscript_path = BOOKS_DIR / validate_manuscript_filename(job["filename"])
         if not manuscript_path.exists():
             raise FileNotFoundError(f"Manuscript not found: {job['filename']}")
 
@@ -815,7 +874,7 @@ class JobRequest(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 async def index():
     manuscripts = sorted(
-        [f.name for f in BOOKS_DIR.iterdir() if f.is_file() and f.suffix in (".md", ".txt")]
+        [f.name for f in BOOKS_DIR.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_MANUSCRIPT_SUFFIXES]
     )
     builds = _list_builds()
     return _render_ui(manuscripts, builds)
@@ -823,26 +882,27 @@ async def index():
 
 @app.post("/upload")
 async def upload_manuscript(file: UploadFile = File(...)):
-    allowed = {".md", ".txt"}
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in allowed:
-        raise HTTPException(status_code=400, detail="Only .md and .txt files are supported.")
-
-    dest = BOOKS_DIR / file.filename
+    filename = validate_manuscript_filename(file.filename)
+    dest = BOOKS_DIR / filename
     async with aiofiles.open(dest, "wb") as f:
         content = await file.read()
         await f.write(content)
 
-    return JSONResponse({"status": "uploaded", "filename": file.filename})
+    return JSONResponse({"status": "uploaded", "filename": filename})
 
 
 @app.post("/api/jobs")
 async def create_job(req: JobRequest, background_tasks: BackgroundTasks):
     job_id = str(uuid.uuid4())
+    validate_manuscript_filename(req.filename)
+    try:
+        voice = normalize_voice_blend(req.voice)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     job_insert({
         "job_id": job_id,
         "filename": req.filename,
-        "voice": req.voice,
+        "voice": voice,
         "speed": req.speed,
         "max_chars": req.max_chars,
         "status": "queued",
@@ -886,7 +946,7 @@ async def stop_job(job_id: str):
 @app.get("/api/manuscripts")
 async def list_manuscripts():
     files = sorted(
-        [f.name for f in BOOKS_DIR.iterdir() if f.is_file() and f.suffix in (".md", ".txt")]
+        [f.name for f in BOOKS_DIR.iterdir() if f.is_file() and f.suffix.lower() in ALLOWED_MANUSCRIPT_SUFFIXES]
     )
     return {"manuscripts": files}
 
@@ -902,8 +962,10 @@ async def get_voices():
 
 @app.post("/api/voices")
 async def save_voices_route(req: VoicesUpdateRequest):
-    # Normalize character keys to lowercase
-    normalized = {k.lower(): v for k, v in req.voices.items()}
+    try:
+        normalized = normalize_voice_profiles(req.voices)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     VOICES_FILE.parent.mkdir(parents=True, exist_ok=True)
     VOICES_FILE.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
     return {"status": "saved", "count": len(normalized)}
@@ -913,6 +975,7 @@ class VoicePreviewRequest(BaseModel):
     text: str = "The sunstone pulsed with a cold light, and Anya felt the Weave tighten around her."
     voice: str = DEFAULT_VOICE
     speed: float = DEFAULT_SPEED
+    pitch_ratio: float = 1.0
 
 
 @app.post("/api/preview/voice")
@@ -921,6 +984,10 @@ async def voice_preview(req: VoicePreviewRequest):
     text = req.text[:500]  # cap at 500 chars for safety
     try:
         audio = call_kokoro(text, req.voice, req.speed)
+        if abs(req.pitch_ratio - 1.0) >= 0.001:
+            audio = apply_pitch(audio, req.pitch_ratio)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Kokoro error: {exc}")
     return StreamingResponse(io.BytesIO(audio), media_type="audio/wav")
@@ -929,9 +996,7 @@ async def voice_preview(req: VoicePreviewRequest):
 @app.post("/api/preview/chapters")
 async def preview_chapters(req: JobRequest):
     """Return the chapter list (title + word count) without generating any audio."""
-    manuscript_path = BOOKS_DIR / req.filename
-    if not manuscript_path.exists():
-        raise HTTPException(status_code=404, detail="Manuscript not found.")
+    manuscript_path = manuscript_path_for(req.filename)
     text = manuscript_path.read_text(encoding="utf-8")
     chapters = split_into_chapters(text)
     result = [
@@ -1035,7 +1100,7 @@ def record_single_chapter(job_id: str, build_id: str, manifest_path: Path) -> No
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         ch_meta = next(c for c in manifest["chapters"] if c["chapter_index"] == chapter_index)
 
-        manuscript_path = BOOKS_DIR / manifest["source_file"]
+        manuscript_path = BOOKS_DIR / validate_manuscript_filename(manifest["source_file"])
         text = manuscript_path.read_text(encoding="utf-8")
         all_chapters = split_into_chapters(text)
 
@@ -1168,41 +1233,54 @@ def _list_builds() -> list[dict]:
 # UI
 # ---------------------------------------------------------------------------
 
+def _h(value) -> str:
+    return html_escape(str(value), quote=True)
+
+
+def _url_part(value) -> str:
+    return quote(str(value), safe="")
+
+
 def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     manuscript_options = "".join(
-        f'<option value="{m}">{m}</option>' for m in manuscripts
+        f'<option value="{_h(m)}">{_h(m)}</option>' for m in manuscripts
     )
     if not manuscript_options:
         manuscript_options = '<option value="" disabled selected>No manuscripts uploaded yet</option>'
 
     build_rows = ""
     for b in builds:
+        build_id = str(b["build_id"])
+        build_id_url = _url_part(build_id)
+        build_id_js = _h(json.dumps(build_id))
         chapters_html = "".join(
+            (
             f'<li>'
-            f'<audio controls preload="metadata" src="/audio/{b["build_id"]}/{ch["output_mp3"]}"></audio>'
-            f' {ch["title"]}'
-            f' <a href="/audio/{b["build_id"]}/{ch["output_mp3"]}" download="{ch["output_mp3"]}" title="Download chapter" style="color:#e8c96e;font-size:0.8rem;margin-left:0.4rem;">&#8681;</a>'
-            f' <button onclick="rechapter(\'{b["build_id"]}\',{ch["chapter_index"]},this)" title="Re-record this chapter" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;margin-left:0.3rem;">&#8635;</button>'
+            f'<audio controls preload="metadata" src="/audio/{build_id_url}/{_url_part(ch["output_mp3"])}"></audio>'
+            f' {_h(ch["title"])}'
+            f' <a href="/audio/{build_id_url}/{_url_part(ch["output_mp3"])}" download="{_h(ch["output_mp3"])}" title="Download chapter" style="color:#e8c96e;font-size:0.8rem;margin-left:0.4rem;">&#8681;</a>'
+            f' <button onclick="rechapter({build_id_js},{int(ch["chapter_index"])},this)" title="Re-record this chapter" style="background:#333;color:#ccc;padding:0.1rem 0.5rem;font-size:0.75rem;margin-left:0.3rem;">&#8635;</button>'
             f'</li>'
+            )
             for ch in b.get("chapters", [])
         )
         m4b_link = (
-            f' &nbsp;<a href="/build/{b["build_id"]}/download/m4b" title="Download M4B audiobook" '
+            f' &nbsp;<a href="/build/{build_id_url}/download/m4b" title="Download M4B audiobook" '
             f'style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; M4B</a>'
             if b.get("m4b") else ""
         )
         delete_btn = (
-            f' &nbsp;<button onclick="deleteBuild(\'{b["build_id"]}\',this)"'
+            f' &nbsp;<button onclick="deleteBuild({build_id_js},this)"'
             f' title="Delete this build" style="background:none;border:none;color:#555;'
             f'font-size:0.85rem;cursor:pointer;padding:0 0.2rem;" '
             f'onmouseover="this.style.color=\'#c0392b\'" onmouseout="this.style.color=\'#555\'">&#128465;</button>'
         )
         build_rows += f"""
         <details>
-          <summary><strong>{b.get("book", b["build_id"])}</strong>
-            &nbsp;|&nbsp; {b.get("voice")} @ {b.get("speed")}
-            &nbsp;|&nbsp; {b.get("draft_date", "")}
-            &nbsp;<a href="/build/{b["build_id"]}/download/zip" title="Download all chapters as ZIP" style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; ZIP</a>
+          <summary><strong>{_h(b.get("book", build_id))}</strong>
+            &nbsp;|&nbsp; {_h(b.get("voice"))} @ {_h(b.get("speed"))}
+            &nbsp;|&nbsp; {_h(b.get("draft_date", ""))}
+            &nbsp;<a href="/build/{build_id_url}/download/zip" title="Download all chapters as ZIP" style="color:#e8c96e;font-size:0.8rem;text-decoration:none;" download>&#8681; ZIP</a>
             {m4b_link}
             {delete_btn}
           </summary>
@@ -1241,6 +1319,9 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
     .chapter-preview td {{ padding:0.2rem 0.5rem; border-bottom:1px solid #2a2a2a; }}
     .chapter-preview td:first-child {{ color:#888; width:2.5rem; }}
     .chapter-preview td:last-child {{ color:#888; text-align:right; width:4rem; }}
+    .blend-editor {{ display:flex; flex-direction:column; gap:0.25rem; min-width:15rem; }}
+    .blend-slot {{ display:grid; grid-template-columns:minmax(8rem,1fr) 4.2rem; gap:0.3rem; align-items:center; }}
+    .blend-slot select, .blend-slot input {{ margin-bottom:0; }}
     #upload-status {{ font-size: 0.8rem; color: #888; margin-top: 0.3rem; }}
   </style>
 </head>
@@ -1334,6 +1415,16 @@ let currentJobId = null;
 let pollTimer = null;
 let voicesData = {{}};
 
+function escapeHtml(value) {{
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({{
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }}[ch]));
+}}
+
 // On load, check localStorage for an in-progress job and reconnect if still active
 window.addEventListener('DOMContentLoaded', async () => {{
   await loadVoices();
@@ -1376,7 +1467,13 @@ async function refreshManuscripts() {{
   const resp = await fetch('/api/manuscripts');
   const data = await resp.json();
   const sel = document.getElementById('manuscript-select');
-  sel.innerHTML = data.manuscripts.map(m => `<option value="${{m}}">${{m}}</option>`).join('');
+  sel.innerHTML = '';
+  for (const m of data.manuscripts) {{
+    const opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    sel.appendChild(opt);
+  }}
 }}
 
 async function startJob() {{
@@ -1446,7 +1543,7 @@ async function previewChapters() {{
   if (!resp.ok) {{ panel.innerHTML = 'Error loading chapters.'; return; }}
   const data = await resp.json();
   const rows = data.chapters.map(ch =>
-    `<tr><td>${{ch.index}}</td><td>${{ch.title}}</td><td>${{ch.word_count.toLocaleString()}} w</td></tr>`
+    `<tr><td>${{ch.index}}</td><td>${{escapeHtml(ch.title)}}</td><td>${{ch.word_count.toLocaleString()}} w</td></tr>`
   ).join('');
   panel.innerHTML = `<strong>${{data.chapter_count}} chapters</strong><table>${{rows}}</table>`;
 }}
@@ -1522,11 +1619,11 @@ function pollStatus() {{
 function renderStatus(job) {{
   const box = document.getElementById('status-box');
   const lines = [
-    `Status: <strong>${{job.status}}</strong>`,
-    job.current_chapter ? `Chapter: ${{job.current_chapter_index}} / ${{job.total_chapters}} &mdash; ${{job.current_chapter}}` : '',
+    `Status: <strong>${{escapeHtml(job.status)}}</strong>`,
+    job.current_chapter ? `Chapter: ${{job.current_chapter_index}} / ${{job.total_chapters}} &mdash; ${{escapeHtml(job.current_chapter)}}` : '',
     job.total_chunks ? `Chunk: ${{job.current_chunk}} / ${{job.total_chunks}}` : '',
-    job.build_id ? `Build: ${{job.build_id}}` : '',
-    job.error ? `<span style="color:#c0392b">Error: ${{job.error}}</span>` : '',
+    job.build_id ? `Build: ${{escapeHtml(job.build_id)}}` : '',
+    job.error ? `<span style="color:#c0392b">Error: ${{escapeHtml(job.error)}}</span>` : '',
   ].filter(Boolean).join('<br>');
   box.innerHTML = lines;
 }}
@@ -1550,9 +1647,9 @@ async function loadVoices() {{
 
 const KOKORO_VOICES = [
   ['🇺🇸 American Female', ['af_alloy','af_aoede','af_bella','af_heart','af_nicole','af_sarah','af_sky']],
-  ['🇺🇸 American Male',   ['am_adam','am_michael']],
+  ['🇺🇸 American Male',   ['am_adam','am_echo','am_fenrir','am_liam','am_michael']],
   ['🇬🇧 British Female',  ['bf_emma','bf_isabella']],
-  ['🇬🇧 British Male',    ['bm_george','bm_lewis']],
+  ['🇬🇧 British Male',    ['bm_fable','bm_george','bm_lewis']],
 ];
 
 // Parse "af_bella(0.6)+bm_george(0.4)" → [{{voice, weight}}, ...]
@@ -1561,23 +1658,28 @@ function parseBlend(str) {{
   if (!str) return [{{voice: '{DEFAULT_VOICE}', weight: 1.0}}];
   const parts = str.split('+').map(s => s.trim()).filter(Boolean);
   return parts.map(p => {{
-    const m = p.match(/^([\\w]+)\\(([\\d.]+)\\)$/);
-    if (m) return {{voice: m[1], weight: parseFloat(m[2])}};
-    return {{voice: p, weight: 1.0}};
+    const m = p.match(/^([^\\s+()]+)(?:\\((\\d+(?:\\.\\d+)?|\\.\\d+)\\))?$/);
+    if (m) return {{voice: m[1], weight: m[2] ? parseFloat(m[2]) : 1.0}};
+    return {{voice: p.replace(/[+()\\s]/g, ''), weight: 1.0}};
   }});
 }}
 
-// [{{voice}}, ...] → "af_bella+bm_george" or "af_bella" if single slot
+// [{{voice, weight}}, ...] → "af_bella(0.6)+bm_george(0.4)".
 function buildBlend(slots) {{
-  const filtered = slots.filter(s => s.voice);
+  const filtered = slots
+    .filter(s => s.voice)
+    .map(s => ({{ voice: s.voice, weight: Number.isFinite(s.weight) && s.weight > 0 ? s.weight : 1.0 }}));
   if (!filtered.length) return '{DEFAULT_VOICE}';
   if (filtered.length === 1) return filtered[0].voice;
-  return filtered.map(s => s.voice).join('+');
+  return filtered.map(s => `${{s.voice}}(${{Number(s.weight.toFixed(3))}})`).join('+');
 }}
 
-function voiceSelectHtml(id, selectedVal) {{
+function voiceSelectHtml(id, selectedVal, allowEmpty = false) {{
   const sStyle = 'background:#222;border:1px solid #444;color:#eee;border-radius:3px;font-size:0.8rem;padding:0.2rem 0.4rem;flex:1;min-width:0;';
   let s = '<select id="' + id + '" style="' + sStyle + '">';
+  if (allowEmpty) {{
+    s += '<option value=""' + (!selectedVal ? ' selected' : '') + '>none</option>';
+  }}
   for (const [label, voices] of KOKORO_VOICES) {{
     s += '<optgroup label="' + label + '">';
     for (const v of voices) {{
@@ -1589,6 +1691,36 @@ function voiceSelectHtml(id, selectedVal) {{
   return s;
 }}
 
+function blendEditorHtml(prefix, currentVoice) {{
+  const slots = parseBlend(currentVoice).slice(0, 3);
+  while (slots.length < 3) slots.push({{voice: '', weight: 1.0}});
+  let html = '<div class="blend-editor">';
+  slots.forEach((slot, idx) => {{
+    const voiceId = prefix + '_voice_' + idx;
+    const weightId = prefix + '_weight_' + idx;
+    const allowEmpty = idx > 0;
+    const weightValue = slot.voice ? slot.weight : '';
+    html += '<div class="blend-slot">';
+    html += voiceSelectHtml(voiceId, slot.voice, allowEmpty);
+    html += '<input id="' + weightId + '" type="number" value="' + weightValue + '" step="0.05" min="0.05" max="5" placeholder="w">';
+    html += '</div>';
+  }});
+  html += '</div>';
+  return html;
+}}
+
+function readBlendFromDom(prefix) {{
+  const slots = [];
+  for (let idx = 0; idx < 3; idx++) {{
+    const vEl = document.getElementById(prefix + '_voice_' + idx);
+    const wEl = document.getElementById(prefix + '_weight_' + idx);
+    if (!vEl || !vEl.value) continue;
+    const weight = wEl ? parseFloat(wEl.value) : 1.0;
+    slots.push({{voice: vEl.value, weight: Number.isFinite(weight) && weight > 0 ? weight : 1.0}});
+  }}
+  return buildBlend(slots);
+}}
+
 
 
 function renderVoicesTable() {{
@@ -1598,7 +1730,7 @@ function renderVoicesTable() {{
   let html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem">';
   html += '<thead><tr style="color:#666;border-bottom:1px solid #333">';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Character</th>';
-  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Voice</th>';
+  html += '<th style="text-align:left;padding:0.2rem 0.4rem">Voice Blend</th>';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Speed</th>';
   html += '<th style="text-align:left;padding:0.2rem 0.4rem">Pitch</th>';
   html += '<th></th></tr></thead><tbody>';
@@ -1609,7 +1741,7 @@ function renderVoicesTable() {{
     const nc = name === 'narrator' ? '#e8c96e' : '#ccc';
     html += '<tr>';
     html += '<td style="padding:0.3rem 0.4rem;color:' + nc + ';white-space:nowrap">' + name + '</td>';
-    html += '<td style="padding:0.3rem 0.4rem">' + voiceSelectHtml('vv_' + name, primaryVoice(p.voice || '{DEFAULT_VOICE}')) + '</td>';
+    html += '<td style="padding:0.3rem 0.4rem">' + blendEditorHtml('vb_' + name, p.voice || '{DEFAULT_VOICE}') + '</td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vs_' + name + '" type="number" value="' + (p.speed !== undefined ? p.speed : 0.85) + '" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem"><input id="vp_' + name + '" type="number" value="' + (p.pitch_ratio !== undefined ? p.pitch_ratio : 1.0) + '" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
     html += '<td style="padding:0.3rem 0.4rem;white-space:nowrap">';
@@ -1621,7 +1753,7 @@ function renderVoicesTable() {{
   }}
   html += '</tbody><tfoot><tr style="border-top:1px solid #333">';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-name" type="text" placeholder="name" style="width:100%;' + iStyle + '"></td>';
-  html += '<td style="padding:0.4rem 0.4rem">' + voiceSelectHtml('vv_new', '{DEFAULT_VOICE}') + '</td>';
+  html += '<td style="padding:0.4rem 0.4rem">' + blendEditorHtml('vb_new', '{DEFAULT_VOICE}') + '</td>';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-speed" type="number" value="{DEFAULT_SPEED}" step="0.05" min="0.5" max="2.0" style="width:5.5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem"><input id="new-char-pitch" type="number" value="1.0" step="0.01" min="0.7" max="1.3" style="width:5rem;' + iStyle + '"></td>';
   html += '<td style="padding:0.4rem 0.4rem;white-space:nowrap">';
@@ -1640,10 +1772,9 @@ function renderVoicesTable() {{
 // voicesData is always the source of truth; DOM is just the edit surface.
 function syncDomToVoicesData() {{
   for (const name of Object.keys(voicesData)) {{
-    const vEl = document.getElementById('vv_' + name);
     const sEl = document.getElementById('vs_' + name);
     const pEl = document.getElementById('vp_' + name);
-    if (vEl) voicesData[name].voice = vEl.value;
+    voicesData[name].voice = readBlendFromDom('vb_' + name);
     if (sEl) voicesData[name].speed = parseFloat(sEl.value);
     if (pEl) voicesData[name].pitch_ratio = parseFloat(pEl.value);
   }}
@@ -1656,9 +1787,8 @@ function addCharVoice() {{
   // Persist any edits made to existing rows before re-rendering
   syncDomToVoicesData();
   if (!voicesData.hasOwnProperty(name)) {{
-    const vEl = document.getElementById('vv_new');
     voicesData[name] = {{
-      voice: vEl ? vEl.value : '{DEFAULT_VOICE}',
+      voice: readBlendFromDom('vb_new'),
       speed: parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED},
       pitch_ratio: parseFloat(document.getElementById('new-char-pitch').value) || 1.0,
     }};
@@ -1688,9 +1818,9 @@ async function saveVoices() {{
 }}
 
 async function testNewCharVoice() {{
-  const vEl = document.getElementById('vv_new');
-  const voice = vEl ? vEl.value : '{DEFAULT_VOICE}';
+  const voice = readBlendFromDom('vb_new');
   const speed = parseFloat(document.getElementById('new-char-speed').value) || {DEFAULT_SPEED};
+  const pitch_ratio = parseFloat(document.getElementById('new-char-pitch').value) || 1.0;
   const text = document.getElementById('preview-text').value.trim() ||
     'The sunstone pulsed with a cold light, and she felt the Weave tighten.';
   const btn = document.querySelector('button[onclick="testNewCharVoice()"]');
@@ -1699,7 +1829,7 @@ async function testNewCharVoice() {{
     const resp = await fetch('/api/preview/voice', {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ text, voice, speed }})
+      body: JSON.stringify({{ text, voice, speed, pitch_ratio }})
     }});
     if (resp.ok) {{
       const blob = await resp.blob();
@@ -1727,7 +1857,7 @@ async function testCharVoice(name) {{
     const resp = await fetch('/api/preview/voice', {{
       method: 'POST',
       headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify({{ text, voice: profile.voice, speed: profile.speed }})
+      body: JSON.stringify({{ text, voice: profile.voice, speed: profile.speed, pitch_ratio: profile.pitch_ratio || 1.0 }})
     }});
     if (resp.ok) {{
       const blob = await resp.blob();
