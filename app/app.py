@@ -320,22 +320,77 @@ def split_into_chapters(text: str) -> list[dict]:
     return [c for c in chapters if c["body"]]
 
 
+def strip_json_comments(raw: str) -> str:
+    """Strip # and // comments outside strings, then remove trailing commas."""
+    result: list[str] = []
+    in_string = False
+    escape_next = False
+    i = 0
+    while i < len(raw):
+        ch = raw[i]
+        nxt = raw[i + 1] if i + 1 < len(raw) else ""
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+        elif ch == "\\" and in_string:
+            result.append(ch)
+            escape_next = True
+        elif ch == '"':
+            result.append(ch)
+            in_string = not in_string
+        elif not in_string and ch == "#":
+            while i < len(raw) and raw[i] not in "\r\n":
+                i += 1
+            continue
+        elif not in_string and ch == "/" and nxt == "/":
+            i += 2
+            while i < len(raw) and raw[i] not in "\r\n":
+                i += 1
+            continue
+        else:
+            result.append(ch)
+        i += 1
+    stripped = "".join(result)
+    return re.sub(r",(\s*[}\]])", r"\1", stripped)
+
+
+def get_pronunciations_info() -> dict:
+    """Return pronunciation file status plus validated substitutions."""
+    info = {
+        "path": str(PRONUNCIATIONS_FILE),
+        "exists": PRONUNCIATIONS_FILE.exists(),
+        "count": 0,
+        "error": None,
+        "pronunciations": {},
+    }
+    if not info["exists"]:
+        return info
+    try:
+        raw = PRONUNCIATIONS_FILE.read_text(encoding="utf-8")
+        parsed = json.loads(strip_json_comments(raw))
+        if not isinstance(parsed, dict):
+            raise ValueError("pronunciations.json must be a JSON object.")
+        substitutions: dict[str, str] = {}
+        for word, replacement in parsed.items():
+            if str(word).startswith("_"):
+                continue
+            if not isinstance(replacement, (str, int, float)):
+                raise ValueError(f"Replacement for {word!r} must be a string or number.")
+            substitutions[str(word)] = str(replacement)
+        info["pronunciations"] = substitutions
+        info["count"] = len(substitutions)
+    except Exception as exc:
+        info["error"] = str(exc)
+    return info
+
+
 def load_pronunciations() -> dict[str, str]:
-    """Load word substitutions from pronunciations.json if it exists.
-    Lines beginning with # (optionally preceded by whitespace) are stripped
-    so users can comment out entries without breaking JSON parsing.
-    """
-    if PRONUNCIATIONS_FILE.exists():
-        try:
-            raw = PRONUNCIATIONS_FILE.read_text(encoding="utf-8")
-            stripped = "\n".join(
-                line for line in raw.splitlines()
-                if not line.lstrip().startswith("#")
-            )
-            return json.loads(stripped)
-        except Exception as exc:
-            logger.warning("Could not load pronunciations file: %s", exc)
-    return {}
+    """Load word substitutions from pronunciations.json if it exists."""
+    info = get_pronunciations_info()
+    if info["error"]:
+        logger.warning("Could not load pronunciations file %s: %s", info["path"], info["error"])
+        return {}
+    return info["pronunciations"]
 
 
 def apply_pronunciations(text: str) -> str:
@@ -345,7 +400,7 @@ def apply_pronunciations(text: str) -> str:
     contains spaces, in which case the phrase is matched literally.
     """
     subs = load_pronunciations()
-    for word, replacement in subs.items():
+    for word, replacement in sorted(subs.items(), key=lambda item: len(item[0]), reverse=True):
         if " " in word:
             # Phrase replacement — literal, case-insensitive
             text = re.sub(re.escape(word), replacement, text, flags=re.IGNORECASE)
@@ -996,6 +1051,10 @@ class VoicePresetsUpdateRequest(BaseModel):
     presets: dict
 
 
+class PronunciationPreviewRequest(BaseModel):
+    text: str
+
+
 @app.get("/api/voices")
 async def get_voices():
     return load_voices()
@@ -1041,6 +1100,25 @@ async def delete_voice_preset(preset_name: str):
     VOICE_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
     VOICE_PRESETS_FILE.write_text(json.dumps(presets, indent=2), encoding="utf-8")
     return {"status": "deleted", "name": key}
+
+
+@app.get("/api/pronunciations/status")
+async def get_pronunciations_status():
+    info = get_pronunciations_info()
+    pronunciations = info.pop("pronunciations")
+    info["sample"] = dict(list(pronunciations.items())[:8])
+    return info
+
+
+@app.post("/api/pronunciations/preview")
+async def preview_pronunciations(req: PronunciationPreviewRequest):
+    text = req.text[:500]
+    processed = apply_pronunciations(text)
+    return {
+        "original": text,
+        "processed": processed,
+        "changed": processed != text,
+    }
 
 
 class VoicePreviewRequest(BaseModel):
@@ -1445,6 +1523,15 @@ def _render_ui(manuscripts: list[str], builds: list[dict]) -> str:
 </section>
 
 <section>
+  <h2>Pronunciations</h2>
+  <div id="pronunciation-status" style="font-size:0.8rem;color:#888;margin-bottom:0.6rem;">Loading&hellip;</div>
+  <label>Preview text</label>
+  <input type="text" id="pronunciation-preview-text" value="Anya felt the Weave near Silverford.">
+  <button onclick="previewPronunciations()" style="background:#333;color:#ccc;">Preview</button>
+  <div id="pronunciation-preview-result" style="font-size:0.85rem;color:#aaa;margin-top:0.6rem;"></div>
+</section>
+
+<section>
   <h2>Voice Presets</h2>
   <p style="font-size:0.8rem;color:#666;margin-top:0;">Save reusable blends here. Saved presets appear in the Record voice dropdown and in character blend selectors; each saved preset row has a delete button.</p>
   <div id="voice-presets-container">Loading&hellip;</div>
@@ -1484,6 +1571,7 @@ function escapeHtml(value) {{
 
 // On load, check localStorage for an in-progress job and reconnect if still active
 window.addEventListener('DOMContentLoaded', async () => {{
+  await loadPronunciationsStatus();
   await loadVoicePresets();
   await loadVoices();
   const saved = localStorage.getItem('chapterforge_job_id');
@@ -1503,6 +1591,52 @@ window.addEventListener('DOMContentLoaded', async () => {{
     }}
   }}
 }});
+
+async function loadPronunciationsStatus() {{
+  const el = document.getElementById('pronunciation-status');
+  if (!el) return;
+  try {{
+    const resp = await fetch('/api/pronunciations/status');
+    if (!resp.ok) {{
+      el.innerHTML = '<span style="color:#c0392b">Could not load pronunciation status.</span>';
+      return;
+    }}
+    const data = await resp.json();
+    if (!data.exists) {{
+      el.innerHTML = 'File: <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">' + escapeHtml(data.path) + '</code><br><span style="color:#caa44f">No pronunciations file found.</span>';
+      return;
+    }}
+    if (data.error) {{
+      el.innerHTML = 'File: <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">' + escapeHtml(data.path) + '</code><br><span style="color:#c0392b">Error: ' + escapeHtml(data.error) + '</span>';
+      return;
+    }}
+    const sample = Object.entries(data.sample || {{}})
+      .map(([k, v]) => escapeHtml(k) + ' → ' + escapeHtml(v))
+      .join(', ');
+    el.innerHTML = 'File: <code style="background:#222;padding:0.1rem 0.3rem;border-radius:3px">' + escapeHtml(data.path) + '</code><br>Loaded: <strong>' + data.count + '</strong>' + (sample ? '<br>Sample: ' + sample : '');
+  }} catch (e) {{
+    el.innerHTML = '<span style="color:#c0392b">Could not load pronunciation status.</span>';
+  }}
+}}
+
+async function previewPronunciations() {{
+  const input = document.getElementById('pronunciation-preview-text');
+  const result = document.getElementById('pronunciation-preview-result');
+  const text = input ? input.value : '';
+  if (!result || !text.trim()) return;
+  result.textContent = 'Checking…';
+  const resp = await fetch('/api/pronunciations/preview', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{ text }})
+  }});
+  if (!resp.ok) {{
+    result.innerHTML = '<span style="color:#c0392b">Preview failed.</span>';
+    return;
+  }}
+  const data = await resp.json();
+  result.innerHTML = '<div>Output:</div><div style="margin-top:0.25rem;background:#222;border:1px solid #333;border-radius:4px;padding:0.5rem;color:' + (data.changed ? '#e8c96e' : '#888') + '">' + escapeHtml(data.processed) + '</div>';
+}}
 
 async function uploadFile() {{
   const input = document.getElementById('file-input');

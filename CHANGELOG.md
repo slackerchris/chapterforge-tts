@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.6.17] - 2026-05-09
+### Added
+- Pronunciations status and preview panel showing the exact `pronunciations.json` path, loaded entry count, parse errors, and before/after replacement output.
+
+### Fixed
+- `pronunciations.json` now tolerates `#` comments, `//` comments, and trailing commas outside strings.
+- Pronunciation entries are validated, `_readme` metadata is ignored, and longer keys are applied before shorter keys.
+
+---
+
 ## [0.6.16] - 2026-05-09
 ### Changed
 - Clarified the UI distinction between reusable Voice Presets and per-character voice assignments.

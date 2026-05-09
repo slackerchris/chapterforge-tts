@@ -77,9 +77,38 @@ services:
 | `KOKORO_RETRY_DELAY` | `10.0` | Seconds between retries |
 | `KOKORO_TIMEOUT` | `300.0` | Per-request timeout in seconds |
 | `WEBHOOK_URL` | _(empty)_ | POST target for job complete / error notifications |
+| `PRONUNCIATIONS_FILE` | `/app/books/pronunciations.json` | Path to custom pronunciation substitutions |
 | `VOICES_FILE` | `/app/books/voices.json` | Path to the character voices config file |
 | `VOICE_PRESETS_FILE` | `/app/books/voice_presets.json` | Path to named voice blend presets |
 | `DB_PATH` | `/app/output/chapterforge.db` | SQLite database path |
+
+---
+
+## Pronunciations
+
+Create `pronunciations.json` alongside your manuscripts to replace words or phrases before text is sent to Kokoro:
+
+```json
+{
+  "Anya": "Ahn-ya",
+  "Weave": "Weev",
+  "Sundered Veil": "Sun-dered Vail"
+}
+```
+
+In Docker Compose, that file should live at:
+
+```
+./books/pronunciations.json
+```
+
+In the production compose example, it should live at:
+
+```
+/mnt/chapterforge/books/pronunciations.json
+```
+
+The web UI shows the exact path it is using, the number of loaded entries, any parse error, and a before/after preview. The parser accepts `#` comments, `//` comments, and trailing commas outside strings.
 
 ---
 
